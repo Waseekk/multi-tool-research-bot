@@ -4,9 +4,20 @@ from typing import List, Dict, Any
 import json
 from datetime import datetime
 
-# Environment setup - MUST be first!
+# Environment setup - handles both local .env and Streamlit Cloud secrets
 from dotenv import load_dotenv
 load_dotenv()
+
+# For Streamlit Cloud: Load secrets if available
+if hasattr(st, 'secrets'):
+    try:
+        # Set environment variables from Streamlit secrets
+        if 'GROQ_API_KEY' in st.secrets:
+            os.environ['GROQ_API_KEY'] = st.secrets['GROQ_API_KEY']
+        if 'TAVILY_API_KEY' in st.secrets:
+            os.environ['TAVILY_API_KEY'] = st.secrets['TAVILY_API_KEY']
+    except Exception as e:
+        pass  # Secrets not configured yet
 
 # LangChain and LangGraph imports
 from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, SystemMessage
@@ -30,18 +41,36 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom CSS for better UI
+st.markdown("""
+<style>
+    .stChatMessage {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .main > div {
+        padding-top: 2rem;
+    }
+    .stButton button {
+        width: 100%;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 class StreamlitChatbot:
     """Streamlit-optimized chatbot"""
     
     def __init__(self):
         if 'chatbot_initialized' not in st.session_state:
-            self.tools = initialize_tools()
-            self.llm_manager = EnhancedLLM()
-            self.conversation_manager = ConversationManager()
-            self.memory = MemorySaver()
-            self.graph = self._build_graph()
-            st.session_state.chatbot_initialized = True
-            st.session_state.chatbot = self
+            with st.spinner("Initializing chatbot and loading tools..."):
+                self.tools = initialize_tools()
+                self.llm_manager = EnhancedLLM()
+                self.conversation_manager = ConversationManager()
+                self.memory = MemorySaver()
+                self.graph = self._build_graph()
+                st.session_state.chatbot_initialized = True
+                st.session_state.chatbot = self
         else:
             chatbot = st.session_state.chatbot
             self.tools = chatbot.tools
@@ -126,9 +155,23 @@ def main():
     """Main Streamlit application"""
     
     # Check for API key FIRST
-    if not os.getenv("GROQ_API_KEY"):
-        st.error("⚠️ GROQ_API_KEY not found! Please add it to your .env file.")
-        st.info("Get your free API key from: https://console.groq.com/")
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        st.error("⚠️ GROQ_API_KEY not found!")
+        st.info("""
+        **To fix this:**
+        
+        **For Streamlit Cloud:**
+        1. Go to your app settings
+        2. Click on "Secrets" 
+        3. Add: `GROQ_API_KEY = "your_key_here"`
+        
+        **For Local Development:**
+        1. Create a `.env` file
+        2. Add: `GROQ_API_KEY=your_key_here`
+        
+        **Get your API key from:** https://console.groq.com/
+        """)
         st.stop()
     
     # Title and description
@@ -160,10 +203,11 @@ def main():
         """)
         
         st.header("⚙️ Settings")
-        if st.button("Clear Chat History"):
+        if st.button("🗑️ Clear Chat History"):
             if 'messages' in st.session_state:
-                del st.session_state.messages
+                st.session_state.messages = []
             st.success("Chat history cleared!")
+            st.rerun()
         
         st.header("📝 Example Queries")
         examples = [
@@ -177,6 +221,10 @@ def main():
         
         for i, example in enumerate(examples):
             if st.button(example, key=f"example_{i}", use_container_width=True):
+                # Initialize messages if not exists
+                if 'messages' not in st.session_state:
+                    st.session_state.messages = []
+                    
                 st.session_state.messages.append({"role": "user", "content": example})
                 
                 with st.spinner("Processing your query..."):
@@ -189,6 +237,16 @@ def main():
                         error_msg = f"Sorry, I encountered an error: {str(e)}"
                         st.session_state.messages.append({"role": "assistant", "content": error_msg})
                         st.rerun()
+        
+        # Add info about deployment
+        st.markdown("---")
+        st.markdown("### 📊 App Info")
+        st.info(f"**Status:** {'✅ Running' if groq_key else '❌ No API Key'}")
+        
+        # GitHub link
+        st.markdown("---")
+        st.markdown("### 🔗 Links")
+        st.markdown("[📂 View on GitHub](https://github.com/YOUR_USERNAME/multi-tool-research-bot)")
     
     # Initialize chat history
     if "messages" not in st.session_state:
@@ -222,7 +280,7 @@ def main():
 
     # Footer
     st.markdown("---")
-    st.markdown("Built with Streamlit, LangChain, and LangGraph")
+    st.markdown("Built with ❤️ using Streamlit, LangChain, and LangGraph | [Report Issues](https://github.com/YOUR_USERNAME/multi-tool-research-bot/issues)")
 
 if __name__ == "__main__":
     main()
