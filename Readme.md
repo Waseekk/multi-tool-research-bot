@@ -27,7 +27,7 @@ An intelligent AI assistant built with Streamlit, LangChain, and LangGraph that 
 
 ## 🚀 Live Demo
 
-[View Live Demo](https://your-app-url.streamlit.app) 
+[View Live Demo](https://multi-tool-research-bot-5pmekpzhczcrdtichq3rw4.streamlit.app/) 
 
 
 ## 🛠️ Installation
