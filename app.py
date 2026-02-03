@@ -178,9 +178,10 @@ def main():
     st.title("🤖 Multi-Tool Research Bot")
     st.markdown("""
     **An intelligent AI assistant with multiple research tools**
-    
+
     This bot can help you with:
-    - 📚 Academic research (ArXiv papers)
+    - 📚 Academic research (ArXiv, PubMed, Semantic Scholar, OpenAlex)
+    - 🏥 Medical & biomedical research (PubMed)
     - 🌐 Web search and current information
     - 📖 Wikipedia knowledge base
     - 🧮 Mathematical calculations
@@ -193,9 +194,15 @@ def main():
     with st.sidebar:
         st.header("🛠️ Available Tools")
         st.markdown("""
-        - **ArXiv Search**: Research papers
+        **Research Sources:**
+        - **ArXiv**: Physics, Math, CS papers
+        - **PubMed**: Medical/biomedical research
+        - **Semantic Scholar**: Highly-cited papers
+        - **OpenAlex**: Open access works
         - **Wikipedia**: General knowledge
         - **Web Search**: Current information
+
+        **Utilities:**
         - **Calculator**: Math operations
         - **Code Analyzer**: Code review
         - **Weather Info**: Location weather

@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_core.tools import tool
-from langchain_community.tools import ArxivQueryRun, WikipediaQueryRun
-from langchain_community.utilities import ArxivAPIWrapper, WikipediaAPIWrapper
+from langchain_community.tools import ArxivQueryRun, WikipediaQueryRun, PubmedQueryRun
+from langchain_community.utilities import ArxivAPIWrapper, WikipediaAPIWrapper, PubMedAPIWrapper
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
 
@@ -122,6 +122,145 @@ Note: This is simulated data for demonstration purposes.
     """.strip()
 
 @tool
+def semantic_scholar_search(query: str, limit: int = 5) -> str:
+    """
+    Search Semantic Scholar for academic papers across all scientific fields.
+    Great for finding highly-cited papers and understanding research impact.
+
+    Args:
+        query: Search query for academic papers
+        limit: Number of results to return (default: 5)
+
+    Returns:
+        Formatted list of papers with title, authors, year, and citation count
+    """
+    import requests
+
+    try:
+        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+        params = {
+            "query": query,
+            "limit": min(limit, 10),
+            "fields": "title,abstract,authors,year,citationCount,url"
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if not data.get("data"):
+            return f"No papers found for query: {query}"
+
+        results = []
+        for i, paper in enumerate(data["data"], 1):
+            title = paper.get("title", "Unknown Title")
+            year = paper.get("year", "N/A")
+            citations = paper.get("citationCount", 0)
+            url = paper.get("url", "")
+
+            authors = paper.get("authors", [])
+            author_names = ", ".join([a.get("name", "") for a in authors[:3]])
+            if len(authors) > 3:
+                author_names += " et al."
+
+            abstract = paper.get("abstract", "")
+            if abstract and len(abstract) > 300:
+                abstract = abstract[:300] + "..."
+
+            result = f"""
+**{i}. {title}**
+- Authors: {author_names}
+- Year: {year} | Citations: {citations}
+- URL: {url}
+- Abstract: {abstract if abstract else 'No abstract available'}
+"""
+            results.append(result)
+
+        return f"## Semantic Scholar Results for '{query}':\n" + "\n".join(results)
+
+    except requests.exceptions.Timeout:
+        return "Error: Semantic Scholar API request timed out. Please try again."
+    except requests.exceptions.RequestException as e:
+        return f"Error searching Semantic Scholar: {str(e)}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@tool
+def openalex_search(query: str, limit: int = 5) -> str:
+    """
+    Search OpenAlex for scholarly works across all academic disciplines.
+    OpenAlex is a free, open catalog of the world's scholarly papers, authors, and institutions.
+
+    Args:
+        query: Search query for academic works
+        limit: Number of results to return (default: 5)
+
+    Returns:
+        Formatted list of works with title, authors, year, and open access status
+    """
+    import requests
+
+    try:
+        url = "https://api.openalex.org/works"
+        params = {
+            "search": query,
+            "per-page": min(limit, 10),
+            "select": "title,authorships,publication_year,cited_by_count,open_access,doi"
+        }
+        headers = {
+            "User-Agent": "MultiToolResearchBot/1.0 (mailto:research@example.com)"
+        }
+
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if not data.get("results"):
+            return f"No works found for query: {query}"
+
+        results = []
+        for i, work in enumerate(data["results"], 1):
+            title = work.get("title", "Unknown Title")
+            year = work.get("publication_year", "N/A")
+            citations = work.get("cited_by_count", 0)
+            doi = work.get("doi", "")
+
+            # Get authors
+            authorships = work.get("authorships", [])
+            author_names = ", ".join([
+                a.get("author", {}).get("display_name", "Unknown")
+                for a in authorships[:3]
+            ])
+            if len(authorships) > 3:
+                author_names += " et al."
+
+            # Open access status
+            oa = work.get("open_access", {})
+            oa_status = "Open Access" if oa.get("is_oa") else "Closed Access"
+            oa_url = oa.get("oa_url", "")
+
+            result = f"""
+**{i}. {title}**
+- Authors: {author_names}
+- Year: {year} | Citations: {citations}
+- Access: {oa_status}
+- DOI: {doi if doi else 'N/A'}
+{f'- Open Access URL: {oa_url}' if oa_url else ''}
+"""
+            results.append(result)
+
+        return f"## OpenAlex Results for '{query}':\n" + "\n".join(results)
+
+    except requests.exceptions.Timeout:
+        return "Error: OpenAlex API request timed out. Please try again."
+    except requests.exceptions.RequestException as e:
+        return f"Error searching OpenAlex: {str(e)}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@tool
 def file_content_generator(file_type: str, content_description: str) -> str:
     """
     Generate sample file content based on type and description.
@@ -222,9 +361,16 @@ def initialize_tools() -> List:
         api_wrapper=wiki_wrapper,
         description="Search Wikipedia for general knowledge, definitions, and factual information."
     )
-    
+
+    # PubMed for medical/biomedical research
+    pubmed_wrapper = PubMedAPIWrapper(top_k_results=5, doc_content_chars_max=1500)
+    pubmed_tool = PubmedQueryRun(
+        api_wrapper=pubmed_wrapper,
+        description="Search PubMed for medical, biomedical, life sciences, and healthcare research papers."
+    )
+
     # Web search tools
-    tools_list = [arxiv_tool, wiki_tool]
+    tools_list = [arxiv_tool, wiki_tool, pubmed_tool]
     
     # Add Tavily if API key is available and package is installed
     if TAVILY_AVAILABLE and os.getenv("TAVILY_API_KEY"):
@@ -263,7 +409,9 @@ def initialize_tools() -> List:
         calculator,
         code_analyzer,
         weather_info,
-        file_content_generator
+        file_content_generator,
+        semantic_scholar_search,
+        openalex_search
     ])
     
     print(f"Initialized {len(tools_list)} tools successfully")
