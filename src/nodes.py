@@ -36,7 +36,10 @@ Current conversation summary: {state.get('conversation_summary', 'New conversati
 Last successful tool: {state.get('last_tool_used', 'None')}
 
 Available tools:
-- arxiv_query_run: Search academic papers on ArXiv
+- arxiv_query_run: Search academic papers on ArXiv (physics, math, CS, etc.)
+- pubmed_query_run: Search PubMed for medical/biomedical research
+- semantic_scholar_search: Search Semantic Scholar for highly-cited papers across all fields
+- openalex_search: Search OpenAlex for open access scholarly works
 - wikipedia_query_run: Search Wikipedia for general knowledge
 - tavily_search_results or duckduckgo_search: Web search for current information
 - calculator: Perform mathematical calculations
