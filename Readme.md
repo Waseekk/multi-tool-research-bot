@@ -1,10 +1,11 @@
 ---
-title: Multi-Tool Research Bot
-emoji: 🔬
+title: Multi-Agent Tool Calling System
+emoji: 🤖
 colorFrom: red
 colorTo: blue
 sdk: streamlit
-sdk_version: 1.49.1
+sdk_version: "1.49.1"
+python_version: "3.11"
 app_file: app.py
 pinned: false
 license: mit
