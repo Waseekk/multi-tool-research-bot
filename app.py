@@ -317,7 +317,7 @@ def main():
         # GitHub link
         st.markdown("---")
         st.markdown("### 🔗 Links")
-        st.markdown("[📂 View on GitHub](https://github.com/YOUR_USERNAME/multi-tool-research-bot)")
+        st.markdown("[View on GitHub](https://github.com/Waseekk/multi-tool-research-bot)")
     
     # Each browser session gets a unique thread_id. MemorySaver uses this as the
     # key to isolate conversation history — without it all users would share one
@@ -365,7 +365,7 @@ def main():
 
     # Footer
     st.markdown("---")
-    st.markdown("Built with ❤️ using Streamlit, LangChain, and LangGraph | [Report Issues](https://github.com/YOUR_USERNAME/multi-tool-research-bot/issues)")
+    st.markdown("Built with ❤️ using Streamlit, LangChain, and LangGraph | [Report Issues](https://github.com/Waseekk/multi-tool-research-bot/issues)")
 
 if __name__ == "__main__":
     main()
