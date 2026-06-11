@@ -46,13 +46,15 @@ def create_enhanced_nodes(tools: List, llm_manager: EnhancedLLM):
           5. Return the response (may contain tool call requests — LangGraph routes accordingly)
 
         On failure:
-          - error_count == 0 -> first failure -> retry with secondary model once
-          - error_count >= 1 -> return a graceful error message to the user
+          - Cascades through all 5 models in order, skipping the one that just failed
+          - Handles 429 rate limits (daily token exhaustion) by automatically switching models
+          - Returns a user-friendly message only when every model is exhausted
 
         State keys written: messages, error_count, current_model_used
         """
+        # Initialize messages before try so it's always accessible in except
+        messages = state.get("messages", [])
         try:
-            messages = state["messages"]
 
             # Scan backwards for the last HumanMessage. Tool messages and AI messages
             # may have been added between the human turn and this node invocation.
@@ -123,31 +125,46 @@ Rules:
         except Exception as e:
             print(f"LLM error: {str(e)}")
             error_count = state.get("error_count", 0) + 1
+            last_error = str(e)
 
-            # One automatic retry using the secondary model. Only on the first failure
-            # (error_count becomes 1) to avoid an infinite retry loop when both models
-            # are degraded. The `messages` variable here refers to the local reassigned
-            # list (with system message prepended) from the try block.
-            if error_count == 1:
+            # Cascade through every model in the fallback chain. This handles 429
+            # rate limits (daily token exhaustion) where the primary is dead for hours
+            # — we skip it and try the next model automatically.
+            failed_model = llm_manager.get_current_model_name()
+            all_configs = (
+                [llm_manager.primary_config, llm_manager.secondary_config]
+                + llm_manager.fallback_configs
+            )
+
+            for config in all_configs:
+                if config.name == failed_model:
+                    continue
                 try:
-                    llm = llm_manager.get_secondary_llm()
-                    llm_with_tools = llm.bind_tools(tools)
-                    response = llm_with_tools.invoke(messages)
+                    fallback_llm = llm_manager._create_llm_instance(config)
+                    if not fallback_llm:
+                        continue
+                    response = fallback_llm.bind_tools(tools).invoke(messages)
+                    llm_manager.current_config = config
+                    print(f"Switched to fallback model: {config.name}")
                     return {
                         "messages": [response],
                         "error_count": 0,
-                        "current_model_used": llm_manager.get_current_model_name(),
+                        "current_model_used": config.name,
                     }
-                except Exception as e2:
-                    print(f"Secondary model also failed: {str(e2)}")
+                except Exception as fe:
+                    last_error = str(fe)
+                    print(f"Fallback {config.name} also failed: {last_error}")
+                    continue
 
+            # Every model failed — surface a clear message
+            is_rate_limit = "429" in last_error or "rate limit" in last_error.lower()
+            user_msg = (
+                "All models are currently rate-limited. Please wait a few minutes and try again."
+                if is_rate_limit
+                else f"All models failed. Last error: {last_error}"
+            )
             return {
-                "messages": [AIMessage(
-                    content=(
-                        f"I encountered an issue processing your request (attempt {error_count}). "
-                        f"Please try again. Error: {str(e)}"
-                    )
-                )],
+                "messages": [AIMessage(content=user_msg)],
                 "error_count": error_count,
             }
 
