@@ -223,6 +223,8 @@ def semantic_scholar_search(query: str, limit: int = 5) -> str:
     """
     import requests
     try:
+        # LLMs sometimes pass limit as a string despite the int type hint
+        limit = int(limit)
         resp = requests.get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
             params={
@@ -282,6 +284,8 @@ def openalex_search(query: str, limit: int = 5) -> str:
     """
     import requests
     try:
+        # LLMs sometimes pass limit as a string despite the int type hint
+        limit = int(limit)
         resp = requests.get(
             "https://api.openalex.org/works",
             params={
