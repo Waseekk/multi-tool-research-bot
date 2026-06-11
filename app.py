@@ -337,7 +337,16 @@ def main():
     # Chat input
     user_input = st.chat_input("Ask me anything! I have access to multiple research tools.")
     
+    def _is_inappropriate(text: str) -> bool:
+        blocked = ["fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy", "cunt", "nigger", "faggot"]
+        t = text.lower()
+        return any(w in t for w in blocked)
+
     if user_input:
+        if _is_inappropriate(user_input):
+            with st.chat_message("assistant"):
+                st.warning("This assistant is designed for research and professional use. Please keep queries respectful.")
+            st.stop()
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
