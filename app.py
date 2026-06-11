@@ -1,10 +1,36 @@
+"""
+app.py
+======
+Entry point for the Streamlit application.
+
+Responsibilities:
+  - Page config and UI layout
+  - Builds the LangGraph graph via StreamlitChatbot._build_graph()
+  - Exposes chat() (non-streaming) and stream_response() (streaming) interfaces
+  - Manages Streamlit session state so the chatbot survives across reruns
+
+Architecture:
+  StreamlitChatbot
+    ├── _build_graph()         — assembles the LangGraph ReAct loop
+    ├── _manage_conversation() — conversation_manager node (trims history, builds summary)
+    ├── _initial_state()       — builds the ConversationState dict for each new message
+    ├── chat()                 — non-streaming invoke (used by sidebar example buttons)
+    └── stream_response()      — streaming generator (used by main chat input)
+
+Modules this file depends on:
+  src/tools.py       — initialize_tools()
+  src/models.py      — EnhancedLLM, ConversationState
+  src/nodes.py       — create_enhanced_nodes()
+  src/conversation.py — ConversationManager
+"""
+
 import streamlit as st
 import os
 from typing import List, Dict, Any
 import json
 from datetime import datetime
 
-# Environment setup - handles both local .env and Streamlit Cloud secrets
+# Handles local .env file; environment variables set here are visible to all modules
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -20,7 +46,8 @@ if hasattr(st, 'secrets'):
         pass  # Secrets not configured yet
 
 # LangChain and LangGraph imports
-from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, SystemMessage
+import uuid
+from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, AIMessageChunk, ToolMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -59,14 +86,23 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 class StreamlitChatbot:
-    """Streamlit-optimized chatbot"""
-    
+    """
+    Wraps the LangGraph compiled graph and exposes chat/stream interfaces to the UI.
+
+    Streamlit reruns the entire script on every user interaction, so the chatbot
+    must be stored in `st.session_state` to survive across reruns. On the first
+    load we initialize everything and cache it; on subsequent reruns we restore
+    from session state rather than rebuilding the graph and reloading tools.
+    """
+
     def __init__(self):
-        if 'chatbot_initialized' not in st.session_state:
+        if "chatbot_initialized" not in st.session_state:
             with st.spinner("Initializing chatbot and loading tools..."):
                 self.tools = initialize_tools()
                 self.llm_manager = EnhancedLLM()
                 self.conversation_manager = ConversationManager()
+                # MemorySaver stores conversation checkpoints in memory (no DB needed).
+                # Each thread_id gets its own isolated message history.
                 self.memory = MemorySaver()
                 self.graph = self._build_graph()
                 st.session_state.chatbot_initialized = True
@@ -80,33 +116,32 @@ class StreamlitChatbot:
             self.graph = chatbot.graph
     
     def _build_graph(self) -> StateGraph:
-        """Build the conversation graph with proper tool execution flow"""
+        """
+        Assembles the LangGraph ReAct loop:
+
+          conversation_manager -> context_llm -> (tools? -> context_llm -> ...) -> END
+
+        tools_condition is LangGraph's built-in router: it reads the last AI message
+        and routes to "enhanced_tools" if it contains tool call requests, or to END
+        if it's a plain text response. This loop continues until the LLM stops
+        requesting tools, at which point it streams the final answer.
+        """
         context_llm, enhanced_tools = create_enhanced_nodes(self.tools, self.llm_manager)
-        
+
         builder = StateGraph(ConversationState)
-        
-        # Add nodes
         builder.add_node("conversation_manager", self._manage_conversation)
         builder.add_node("context_llm", context_llm)
         builder.add_node("enhanced_tools", enhanced_tools)
-        
-        # Define the flow
+
         builder.add_edge(START, "conversation_manager")
         builder.add_edge("conversation_manager", "context_llm")
-        
-        # CRITICAL: This determines if tools should be called or if we're done
         builder.add_conditional_edges(
             "context_llm",
-            tools_condition,  # This checks if the LLM response contains tool calls
-            {
-                "tools": "enhanced_tools",  # If tool calls found, go to tools
-                "__end__": END              # If no tool calls, end conversation
-            }
+            tools_condition,
+            {"tools": "enhanced_tools", "__end__": END},
         )
-        
-        # After tools execute, go back to LLM to process results
         builder.add_edge("enhanced_tools", "context_llm")
-        
+
         return builder.compile(checkpointer=self.memory)
     
     def _manage_conversation(self, state: ConversationState) -> ConversationState:
@@ -125,31 +160,59 @@ class StreamlitChatbot:
             "model_switch_count": state.get("model_switch_count", 0)
         }
     
-    def chat(self, message: str, thread_id: str = "streamlit") -> str:
-        """Chat interface for Streamlit"""
+    def _initial_state(self, message: str) -> dict:
+        return {
+            "messages": [HumanMessage(content=message)],
+            "user_context": {},
+            "tool_results_cache": {},
+            "conversation_summary": "",
+            "error_count": 0,
+            "last_tool_used": "",
+            "current_model_used": "",
+            "model_switch_count": 0,
+        }
+
+    def chat(self, message: str, thread_id: str = "default") -> str:
+        """Non-streaming chat — used for sidebar example buttons"""
         try:
-            initial_state = {
-                "messages": [HumanMessage(content=message)],
-                "user_context": {},
-                "tool_results_cache": {},
-                "conversation_summary": "",
-                "error_count": 0,
-                "last_tool_used": ""
-            }
-            
             config = {"configurable": {"thread_id": thread_id}}
-            result = self.graph.invoke(initial_state, config)
-            
-            final_messages = result["messages"]
-            ai_messages = [msg for msg in final_messages if isinstance(msg, AIMessage)]
-            
-            if ai_messages:
-                return ai_messages[-1].content
-            else:
-                return "I'm sorry, I couldn't generate a response. Please try again."
-                
+            result = self.graph.invoke(self._initial_state(message), config)
+            ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
+            return ai_messages[-1].content if ai_messages else "I couldn't generate a response. Please try again."
         except Exception as e:
             return f"Error: {str(e)}. Please check your API keys and try again."
+
+    def stream_response(self, message: str, thread_id: str = "default"):
+        """
+        Yields string chunks suitable for st.write_stream (token-by-token streaming).
+
+        Two types of chunks are emitted:
+        1. Tool indicator — when a ToolMessage arrives from enhanced_tools, we yield
+           a brief italic line so the user sees progress instead of a blank screen
+           during multi-second API calls (e.g. ArXiv searches).
+        2. LLM tokens — AIMessageChunk.content from context_llm. We filter on
+           `langgraph_node == "context_llm"` because other nodes (conversation_manager,
+           enhanced_tools) also emit messages we don't want to surface raw. We also
+           skip chunks that only contain tool_call_chunks — those are the LLM
+           deciding which tool to call, not text meant for the user.
+        """
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            for chunk, metadata in self.graph.stream(
+                self._initial_state(message), config, stream_mode="messages"
+            ):
+                node = metadata.get("langgraph_node", "")
+                if node == "enhanced_tools" and isinstance(chunk, ToolMessage):
+                    yield f"\n*Searching with {chunk.name}...*\n\n"
+                elif (
+                    node == "context_llm"
+                    and isinstance(chunk, AIMessageChunk)
+                    and chunk.content
+                    and not getattr(chunk, "tool_call_chunks", None)
+                ):
+                    yield chunk.content
+        except Exception as e:
+            yield f"\n\nError: {str(e)}"
 
 def main():
     """Main Streamlit application"""
@@ -218,12 +281,12 @@ def main():
         
         st.header("📝 Example Queries")
         examples = [
-            "Calculate 15% of 2,500",
-            "Latest research on quantum computing",
-            "Weather in New York",
-            "Analyze this Python code: def hello(): print('Hi')",
-            "Generate a CSV for student data",
-            "What is machine learning?"
+            "Find the latest ArXiv papers on large language models",
+            "Search PubMed for recent studies on CRISPR gene editing",
+            "Find highly cited papers on transformer architecture using Semantic Scholar",
+            "Calculate compound interest: 5000 at 7% annual rate for 10 years",
+            "Search recent news about AI regulation",
+            "Analyze this Python code: def fib(n): return n if n<=1 else fib(n-1)+fib(n-2)",
         ]
         
         for i, example in enumerate(examples):
@@ -237,7 +300,8 @@ def main():
                 with st.spinner("Processing your query..."):
                     try:
                         chatbot = StreamlitChatbot()
-                        response = chatbot.chat(example)
+                        thread_id = st.session_state.get("thread_id", str(uuid.uuid4()))
+                        response = chatbot.chat(example, thread_id=thread_id)
                         st.session_state.messages.append({"role": "assistant", "content": response})
                         st.rerun()
                     except Exception as e:
@@ -255,6 +319,12 @@ def main():
         st.markdown("### 🔗 Links")
         st.markdown("[📂 View on GitHub](https://github.com/YOUR_USERNAME/multi-tool-research-bot)")
     
+    # Each browser session gets a unique thread_id. MemorySaver uses this as the
+    # key to isolate conversation history — without it all users would share one
+    # memory and see each other's messages.
+    if "thread_id" not in st.session_state:
+        st.session_state.thread_id = str(uuid.uuid4())
+
     # Initialize chat history
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -271,19 +341,18 @@ def main():
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
-        
+
         with st.chat_message("assistant"):
-            with st.spinner("Thinking and using tools..."):
-                try:
-                    chatbot = StreamlitChatbot()
-                    response = chatbot.chat(user_input)
-                    st.markdown(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
-                    
-                except Exception as e:
-                    error_msg = f"Sorry, I encountered an error: {str(e)}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            try:
+                chatbot = StreamlitChatbot()
+                response = st.write_stream(
+                    chatbot.stream_response(user_input, thread_id=st.session_state.thread_id)
+                )
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            except Exception as e:
+                error_msg = f"Sorry, I encountered an error: {str(e)}"
+                st.error(error_msg)
+                st.session_state.messages.append({"role": "assistant", "content": error_msg})
 
     # Footer
     st.markdown("---")

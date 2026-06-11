@@ -17,6 +17,7 @@ duckduckgo-search>=3.9.0
 # Utilities
 python-dotenv>=1.0.0
 typing-extensions>=4.8.0
+xmltodict>=0.13.0
 
 # Optional: For enhanced features
 requests>=2.31.0
