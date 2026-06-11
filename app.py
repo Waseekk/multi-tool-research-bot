@@ -291,23 +291,10 @@ def main():
         
         for i, example in enumerate(examples):
             if st.button(example, key=f"example_{i}", use_container_width=True):
-                # Initialize messages if not exists
-                if 'messages' not in st.session_state:
-                    st.session_state.messages = []
-                    
-                st.session_state.messages.append({"role": "user", "content": example})
-                
-                with st.spinner("Processing your query..."):
-                    try:
-                        chatbot = StreamlitChatbot()
-                        thread_id = st.session_state.get("thread_id", str(uuid.uuid4()))
-                        response = chatbot.chat(example, thread_id=thread_id)
-                        st.session_state.messages.append({"role": "assistant", "content": response})
-                        st.rerun()
-                    except Exception as e:
-                        error_msg = f"Sorry, I encountered an error: {str(e)}"
-                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                        st.rerun()
+                # Stage the example as a pending input; the main chat loop
+                # handles it with the same streaming path as regular messages.
+                st.session_state.pending_example = example
+                st.rerun()
         
         # Add info about deployment
         st.markdown("---")
@@ -334,9 +321,11 @@ def main():
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
     
-    # Chat input
+    # Chat input — also picks up example button clicks staged via pending_example
     user_input = st.chat_input("Ask me anything! I have access to multiple research tools.")
-    
+    if "pending_example" in st.session_state:
+        user_input = st.session_state.pop("pending_example")
+
     def _is_inappropriate(text: str) -> bool:
         blocked = ["fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy", "cunt", "nigger", "faggot"]
         t = text.lower()
