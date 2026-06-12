@@ -128,10 +128,9 @@ class EnhancedLLM:
         # Llama 4 Scout — verified live on Groq June 2026, replaces decommissioned llama-3.1-70b-versatile
         self.secondary_config = ModelConfig("meta-llama/llama-4-scout-17b-16e-instruct", temperature=0.1, max_tokens=4096)
 
-        # All models below are verified live on groq.com/docs/models with tool-calling support.
-        # Different architectures help when one provider's endpoints are all rate-limited.
+        # qwen/qwen3-32b removed: only 6000 TPM on free tier, hits 413 on any long conversation.
+        # llama-3.1-8b-instant confirmed working from logs; cheapest and fastest last resort.
         self.fallback_configs = [
-            ModelConfig("qwen/qwen3-32b",       temperature=0.1, max_tokens=4096),
             ModelConfig("llama-3.1-8b-instant", temperature=0.1, max_tokens=2048),
         ]
 
