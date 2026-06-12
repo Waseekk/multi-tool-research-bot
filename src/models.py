@@ -103,15 +103,16 @@ class EnhancedLLM:
     Manages a cascade of Groq models with automatic failover and per-task routing.
 
     Fallback chain (tried in order when the preferred model is unavailable):
-        1. llama-3.3-70b-versatile             — primary; best overall quality
-        2. llama-3.1-8b-instant                — secondary; fast, confirmed tool-calling support
-        3. llama-3.1-8b-instant                — fallback 1 (same model, different instance)
-        4. llama3-groq-8b-8192-tool-use-preview — last resort; fine-tuned specifically for tool use
+        1. llama-3.3-70b-versatile                   — primary; best overall quality
+        2. meta-llama/llama-4-scout-17b-16e-instruct  — secondary; Llama 4, 594 TPS, confirmed on Groq
+        3. qwen/qwen3-32b                             — fallback 1; parallel tool support, different arch
+        4. llama-3.1-8b-instant                       — fallback 2; fastest/cheapest, last resort
 
-    NOTE: llama-3.1-70b-versatile was decommissioned by Groq on ~2026-06-11 and removed.
-    It was previously the secondary and caused every research/analysis query to immediately
-    fail with HTTP 400, since task_model_mapping routes those tasks to secondary_config.
-    Only models with confirmed Groq tool-calling support are included.
+    Models removed as decommissioned by Groq (~2026-06-11):
+        llama-3.1-70b-versatile, mixtral-8x7b-32768
+    Model removed as non-existent:
+        llama3-groq-8b-8192-tool-use-preview (preview model, no longer listed on Groq)
+    All remaining models verified live on groq.com/docs/models with tool-calling support.
 
     A failed model enters a 60-second cooldown before being retried, preventing
     repeated hammering of a rate-limited endpoint while still recovering automatically.
@@ -123,17 +124,15 @@ class EnhancedLLM:
     """
 
     def __init__(self):
-        self.primary_config   = ModelConfig("llama-3.3-70b-versatile", temperature=0.1, max_tokens=4096)
-        # llama-3.1-70b-versatile was decommissioned by Groq (~2026-06-11).
-        # Using llama-3.1-8b-instant instead — smaller but confirmed working and supports tool calling.
-        self.secondary_config = ModelConfig("llama-3.1-8b-instant",    temperature=0.1, max_tokens=2048)
+        self.primary_config   = ModelConfig("llama-3.3-70b-versatile",                   temperature=0.1, max_tokens=4096)
+        # Llama 4 Scout — verified live on Groq June 2026, replaces decommissioned llama-3.1-70b-versatile
+        self.secondary_config = ModelConfig("meta-llama/llama-4-scout-17b-16e-instruct", temperature=0.1, max_tokens=4096)
 
-        # Only models with confirmed Groq tool-calling support are included here.
-        # gemma2-9b-it and llama3-70b-8192 were removed: they ignore bind_tools() on Groq,
-        # causing the agent to stall silently when rate limits push the app to those fallbacks.
+        # All models below are verified live on groq.com/docs/models with tool-calling support.
+        # Different architectures help when one provider's endpoints are all rate-limited.
         self.fallback_configs = [
-            ModelConfig("llama-3.1-8b-instant",                temperature=0.1, max_tokens=2048),
-            ModelConfig("llama3-groq-8b-8192-tool-use-preview", temperature=0.1, max_tokens=2048),
+            ModelConfig("qwen/qwen3-32b",       temperature=0.1, max_tokens=4096),
+            ModelConfig("llama-3.1-8b-instant", temperature=0.1, max_tokens=2048),
         ]
 
         self.current_config = self.primary_config
