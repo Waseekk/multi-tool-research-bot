@@ -12,7 +12,7 @@ Graph wiring is done in app.py (_build_graph). State schema is in models.py.
 """
 
 from typing import List
-from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, ToolMessage, BaseMessage
 from langgraph.prebuilt import ToolNode, tools_condition
 from .models import ConversationState, EnhancedLLM
 
@@ -202,13 +202,32 @@ Rules:
 
         except Exception as e:
             print(f"Tool execution error: {str(e)}")
+            # Find the last AI message's tool_calls so we can return a ToolMessage
+            # for each pending call. Returning an AIMessage here instead would break
+            # the message sequence (AIMessage with tool_calls must be followed by
+            # ToolMessages) and would never be streamed (streaming only captures from
+            # context_llm, not enhanced_tools).
+            messages = state.get("messages", [])
+            last_ai_msg = None
+            for msg in reversed(messages):
+                if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                    last_ai_msg = msg
+                    break
+
+            if last_ai_msg and last_ai_msg.tool_calls:
+                return {
+                    "messages": [
+                        ToolMessage(
+                            content=f"Tool error: {str(e)}. Try a different approach.",
+                            tool_call_id=tc["id"],
+                            name=tc["name"],
+                        )
+                        for tc in last_ai_msg.tool_calls
+                    ],
+                    "error_count": state.get("error_count", 0) + 1,
+                }
             return {
-                "messages": [AIMessage(
-                    content=(
-                        f"I encountered an error while using the tools: {str(e)}. "
-                        "Please try rephrasing your question."
-                    )
-                )],
+                "messages": [AIMessage(content=f"Error using tools: {str(e)}")],
                 "error_count": state.get("error_count", 0) + 1,
             }
 

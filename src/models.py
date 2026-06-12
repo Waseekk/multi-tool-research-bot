@@ -105,7 +105,7 @@ class EnhancedLLM:
     Fallback chain (tried in order when the preferred model is unavailable):
         1. llama-3.3-70b-versatile  — primary; best overall quality
         2. llama-3.1-70b-versatile  — secondary; similar quality, different checkpoint
-        3. mixtral-8x7b-32768       — stable MoE fallback; avoids preview models
+        3. llama3-70b-8192          — original Llama 3 70B; stable Groq endpoint
         4. llama-3.1-8b-instant     — fast/small; lower quality but reliable
         5. gemma2-9b-it             — last resort; different architecture helps when
                                       LLaMA endpoints are rate-limited
@@ -123,9 +123,10 @@ class EnhancedLLM:
         self.primary_config   = ModelConfig("llama-3.3-70b-versatile", temperature=0.1, max_tokens=4096)
         self.secondary_config = ModelConfig("llama-3.1-70b-versatile",  temperature=0.1, max_tokens=4096)
 
-        # Ordered by preference: mixtral first (high quality), then smaller models
+        # Ordered by preference: high-quality first, then smaller/faster models.
+        # mixtral-8x7b-32768 was removed from Groq in early 2025 — replaced with llama3-70b-8192.
         self.fallback_configs = [
-            ModelConfig("mixtral-8x7b-32768",   temperature=0.1, max_tokens=4096),
+            ModelConfig("llama3-70b-8192",       temperature=0.1, max_tokens=4096),
             ModelConfig("llama-3.1-8b-instant",  temperature=0.1, max_tokens=2048),
             ModelConfig("gemma2-9b-it",           temperature=0.1, max_tokens=2048),
         ]
