@@ -175,7 +175,9 @@ class StreamlitChatbot:
     def chat(self, message: str, thread_id: str = "default") -> str:
         """Non-streaming chat — used for sidebar example buttons"""
         try:
-            config = {"configurable": {"thread_id": thread_id}}
+            # recursion_limit prevents infinite tool-calling loops where a weak
+            # fallback model keeps re-calling tools instead of writing a final answer
+            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
             result = self.graph.invoke(self._initial_state(message), config)
             ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
             return ai_messages[-1].content if ai_messages else "I couldn't generate a response. Please try again."
@@ -203,7 +205,9 @@ class StreamlitChatbot:
                                 enhanced_tools never call an LLM)
           - AIMessage (whole) → returned by the error handler when all models fail
         """
-        config = {"configurable": {"thread_id": thread_id}}
+        # recursion_limit prevents infinite tool-calling loops where a weak
+        # fallback model keeps re-calling tools instead of writing a final answer
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
         try:
             for chunk, metadata in self.graph.stream(
                 self._initial_state(message), config, stream_mode="messages"
