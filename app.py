@@ -231,26 +231,15 @@ class StreamlitChatbot:
 
 def main():
     """Main Streamlit application"""
-    
-    # Check for API key FIRST
-    groq_key = os.getenv("GROQ_API_KEY")
-    if not groq_key:
-        st.error("⚠️ GROQ_API_KEY not found!")
-        st.info("""
-        **To fix this:**
-        
-        **For Streamlit Cloud:**
-        1. Go to your app settings
-        2. Click on "Secrets" 
-        3. Add: `GROQ_API_KEY = "your_key_here"`
-        
-        **For Local Development:**
-        1. Create a `.env` file
-        2. Add: `GROQ_API_KEY=your_key_here`
-        
-        **Get your API key from:** https://console.groq.com/
-        """)
-        st.stop()
+
+    # --- Resolve active API key ---
+    # Priority: key entered in the sidebar > key from .env / HuggingFace Secrets
+    user_key = st.session_state.get("user_groq_key", "").strip()
+    env_key  = os.getenv("GROQ_API_KEY", "").strip()
+    active_key = user_key or env_key
+    # Write the resolved key back to the environment so ChatGroq picks it up
+    if active_key:
+        os.environ["GROQ_API_KEY"] = active_key
     
     # Title and description
     st.title("🤖 Multi-Tool Research Bot")
@@ -270,6 +259,38 @@ def main():
     
     # Sidebar
     with st.sidebar:
+        # --- API key input ---
+        st.header("🔑 Groq API Key")
+        with st.expander("Use your own key", expanded=not active_key):
+            st.markdown(
+                "Get a **free** key at [console.groq.com](https://console.groq.com/). "
+                "Your key is only stored in your browser session — never saved anywhere."
+            )
+            entered_key = st.text_input(
+                "Paste key here",
+                type="password",
+                placeholder="gsk_...",
+                value=st.session_state.get("user_groq_key", ""),
+                label_visibility="collapsed",
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Apply", use_container_width=True):
+                    new_key = entered_key.strip()
+                    if new_key != st.session_state.get("user_groq_key", ""):
+                        st.session_state.user_groq_key = new_key
+                        # Force chatbot to reinitialize with the new key
+                        st.session_state.pop("chatbot_initialized", None)
+                        st.session_state.pop("chatbot", None)
+                    st.rerun()
+            with col2:
+                if st.button("Remove", use_container_width=True):
+                    st.session_state.user_groq_key = ""
+                    st.session_state.pop("chatbot_initialized", None)
+                    st.session_state.pop("chatbot", None)
+                    st.rerun()
+
+        st.markdown("---")
         st.header("🛠️ Available Tools")
         st.markdown("""
         **Research Sources:**
@@ -314,13 +335,24 @@ def main():
         # Add info about deployment
         st.markdown("---")
         st.markdown("### 📊 App Info")
-        st.info(f"**Status:** {'✅ Running' if groq_key else '❌ No API Key'}")
+        if active_key:
+            key_source = "your key" if user_key else "shared key"
+            st.info(f"**Status:** ✅ Running\n\n**Key:** {key_source}")
+        else:
+            st.error("**Status:** ❌ No API key")
         
         # GitHub link
         st.markdown("---")
         st.markdown("### 🔗 Links")
         st.markdown("[View on GitHub](https://github.com/Waseekk/multi-tool-research-bot)")
     
+    # Gate: require a key before the chatbot initializes.
+    # Placed here (after sidebar) so the key input is always visible even with no key.
+    if not active_key:
+        st.warning("⚠️ No Groq API key found. Enter your key in the sidebar to get started.")
+        st.info("Get a **free** key in 30 seconds at [console.groq.com](https://console.groq.com/) — no credit card needed.")
+        st.stop()
+
     # Each browser session gets a unique thread_id. MemorySaver uses this as the
     # key to isolate conversation history — without it all users would share one
     # memory and see each other's messages.
