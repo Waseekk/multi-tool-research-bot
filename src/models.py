@@ -104,13 +104,14 @@ class EnhancedLLM:
 
     Fallback chain (tried in order when the preferred model is unavailable):
         1. llama-3.3-70b-versatile             — primary; best overall quality
-        2. llama-3.1-70b-versatile             — secondary; similar quality, different checkpoint
-        3. llama-3.1-8b-instant                — fast/small; confirmed tool-calling support on Groq
+        2. llama-3.1-8b-instant                — secondary; fast, confirmed tool-calling support
+        3. llama-3.1-8b-instant                — fallback 1 (same model, different instance)
         4. llama3-groq-8b-8192-tool-use-preview — last resort; fine-tuned specifically for tool use
 
-    NOTE: Only models with confirmed Groq tool-calling (function calling) support are
-    included. gemma2-9b-it and llama3-70b-8192 were removed — they ignore bind_tools()
-    on Groq, causing the agent loop to stall silently when they're selected.
+    NOTE: llama-3.1-70b-versatile was decommissioned by Groq on ~2026-06-11 and removed.
+    It was previously the secondary and caused every research/analysis query to immediately
+    fail with HTTP 400, since task_model_mapping routes those tasks to secondary_config.
+    Only models with confirmed Groq tool-calling support are included.
 
     A failed model enters a 60-second cooldown before being retried, preventing
     repeated hammering of a rate-limited endpoint while still recovering automatically.
@@ -123,7 +124,9 @@ class EnhancedLLM:
 
     def __init__(self):
         self.primary_config   = ModelConfig("llama-3.3-70b-versatile", temperature=0.1, max_tokens=4096)
-        self.secondary_config = ModelConfig("llama-3.1-70b-versatile",  temperature=0.1, max_tokens=4096)
+        # llama-3.1-70b-versatile was decommissioned by Groq (~2026-06-11).
+        # Using llama-3.1-8b-instant instead — smaller but confirmed working and supports tool calling.
+        self.secondary_config = ModelConfig("llama-3.1-8b-instant",    temperature=0.1, max_tokens=2048)
 
         # Only models with confirmed Groq tool-calling support are included here.
         # gemma2-9b-it and llama3-70b-8192 were removed: they ignore bind_tools() on Groq,

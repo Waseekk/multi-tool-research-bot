@@ -39,19 +39,20 @@ from langchain_community.utilities import ArxivAPIWrapper, WikipediaAPIWrapper, 
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
 
-# Tavily changed its package in late 2024: canonical import moved to `langchain_tavily`.
-# We try the new package first and fall back to the legacy location so the app
-# works regardless of which version is installed in a given environment.
+# TavilySearchResults from langchain_community is the stable wrapper — prefer it.
+# langchain_tavily.TavilySearch has a bug where newer tavily-python versions changed
+# the response structure and it calls `.results` on an object that no longer has that
+# attribute, causing a runtime crash on every web search tool call.
 try:
-    from langchain_tavily import TavilySearch
+    from langchain_community.tools.tavily_search import TavilySearchResults
     TAVILY_AVAILABLE = True
 except ImportError:
     try:
-        from langchain_community.tools.tavily_search import TavilySearchResults
+        from langchain_tavily import TavilySearch
         TAVILY_AVAILABLE = True
     except ImportError:
         TAVILY_AVAILABLE = False
-        print("Tavily not available. Install with: pip install langchain-tavily")
+        print("Tavily not available. Install with: pip install langchain-community")
 
 
 # ---------------------------------------------------------------------------
@@ -377,18 +378,19 @@ def initialize_tools() -> List:
     tools_list = [arxiv_tool, wiki_tool, pubmed_tool]
 
     # Tavily is a paid service — only included when the API key is present.
-    # Prefer the new langchain_tavily package; fall back to legacy langchain_community
-    # for environments that haven't upgraded yet.
+    # Prefer TavilySearchResults (langchain_community) — stable and avoids the
+    # '.results' attribute crash in langchain_tavily with newer tavily-python versions.
     if TAVILY_AVAILABLE and os.getenv("TAVILY_API_KEY"):
         try:
             try:
-                tavily_tool = TavilySearch(
+                # TavilySearchResults is the preferred stable wrapper
+                tavily_tool = TavilySearchResults(
                     max_results=5,
                     description="Search the web for recent news and real-time information.",
                 )
             except NameError:
-                # TavilySearch not imported (old package) — use TavilySearchResults instead
-                tavily_tool = TavilySearchResults(
+                # TavilySearchResults not imported — fall back to new langchain_tavily package
+                tavily_tool = TavilySearch(
                     max_results=5,
                     description="Search the web for recent news and real-time information.",
                 )
