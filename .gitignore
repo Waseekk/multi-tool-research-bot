@@ -78,3 +78,6 @@ htmlcov/
 # Temporary files
 *.tmp
 *.temp
+
+# Documentation (local only)
+docs/
