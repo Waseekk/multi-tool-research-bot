@@ -6,7 +6,7 @@ langchain>=0.1.0
 langchain-community>=0.0.20
 langchain-core>=0.1.0
 langchain-groq>=0.1.0
-langgraph>=0.0.26
+langgraph>=0.2.0
 
 # Research and search tools
 arxiv>=1.4.0
