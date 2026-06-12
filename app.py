@@ -187,37 +187,41 @@ class StreamlitChatbot:
         Yields string chunks suitable for st.write_stream (token-by-token streaming).
 
         Two types of chunks are emitted:
-        1. Tool indicator — when a ToolMessage arrives from enhanced_tools, we yield
-           a brief italic line so the user sees progress instead of a blank screen
-           during multi-second API calls (e.g. ArXiv searches).
-        2. LLM tokens — AIMessageChunk.content from context_llm. We filter on
-           `langgraph_node == "context_llm"` because other nodes (conversation_manager,
-           enhanced_tools) also emit messages we don't want to surface raw. We also
-           skip chunks that only contain tool_call_chunks — those are the LLM
-           deciding which tool to call, not text meant for the user.
+        1. Tool indicator — ToolMessage signals a tool just ran; we yield a brief italic
+           line so the user sees progress instead of a blank screen during multi-second
+           API calls (e.g. ArXiv searches).
+        2. LLM tokens — AIMessageChunk with text content. We skip chunks that only carry
+           tool_call_chunks (the LLM choosing which tool to call) and surface only the
+           final human-readable answer tokens.
+
+        NOTE: We intentionally do NOT filter by langgraph_node name. The metadata key
+        "langgraph_node" changed or is absent in some LangGraph versions, which caused
+        every chunk to be silently dropped on tool-using queries. Filtering by message
+        type alone is sufficient and more robust across versions:
+          - ToolMessage       → only ever comes from the tool execution node
+          - AIMessageChunk    → only streamed by LLM nodes (conversation_manager and
+                                enhanced_tools never call an LLM)
+          - AIMessage (whole) → returned by the error handler when all models fail
         """
         config = {"configurable": {"thread_id": thread_id}}
         try:
             for chunk, metadata in self.graph.stream(
                 self._initial_state(message), config, stream_mode="messages"
             ):
-                node = metadata.get("langgraph_node", "")
-                if node == "enhanced_tools" and isinstance(chunk, ToolMessage):
+                if isinstance(chunk, ToolMessage):
+                    # Show a progress indicator while the tool runs so the UI isn't blank
                     yield f"\n*Searching with {chunk.name}...*\n\n"
-                elif node == "context_llm":
-                    if (
-                        isinstance(chunk, AIMessageChunk)
-                        and chunk.content
-                        # tool_call_chunks are the LLM deciding which tool to call —
-                        # skip those; we only want the final human-readable answer tokens
-                        and not getattr(chunk, "tool_call_chunks", None)
-                    ):
-                        yield chunk.content
-                    elif isinstance(chunk, AIMessage) and chunk.content:
-                        # The error handler in context_aware_llm returns a complete AIMessage
-                        # (not streamed chunks) when all models fail. LangGraph emits it as
-                        # AIMessage, not AIMessageChunk, so it needs its own branch here.
-                        yield chunk.content
+                elif (
+                    isinstance(chunk, AIMessageChunk)
+                    and chunk.content
+                    # tool_call_chunks = LLM deciding which tool to call; skip those
+                    and not getattr(chunk, "tool_call_chunks", None)
+                ):
+                    yield chunk.content
+                elif isinstance(chunk, AIMessage) and chunk.content:
+                    # The all-models-failed error handler returns a complete AIMessage,
+                    # not streamed chunks — catch it here so it isn't silently dropped
+                    yield chunk.content
         except Exception as e:
             yield f"\n\nError: {str(e)}"
 
