@@ -103,12 +103,14 @@ class EnhancedLLM:
     Manages a cascade of Groq models with automatic failover and per-task routing.
 
     Fallback chain (tried in order when the preferred model is unavailable):
-        1. llama-3.3-70b-versatile  — primary; best overall quality
-        2. llama-3.1-70b-versatile  — secondary; similar quality, different checkpoint
-        3. llama3-70b-8192          — original Llama 3 70B; stable Groq endpoint
-        4. llama-3.1-8b-instant     — fast/small; lower quality but reliable
-        5. gemma2-9b-it             — last resort; different architecture helps when
-                                      LLaMA endpoints are rate-limited
+        1. llama-3.3-70b-versatile             — primary; best overall quality
+        2. llama-3.1-70b-versatile             — secondary; similar quality, different checkpoint
+        3. llama-3.1-8b-instant                — fast/small; confirmed tool-calling support on Groq
+        4. llama3-groq-8b-8192-tool-use-preview — last resort; fine-tuned specifically for tool use
+
+    NOTE: Only models with confirmed Groq tool-calling (function calling) support are
+    included. gemma2-9b-it and llama3-70b-8192 were removed — they ignore bind_tools()
+    on Groq, causing the agent loop to stall silently when they're selected.
 
     A failed model enters a 60-second cooldown before being retried, preventing
     repeated hammering of a rate-limited endpoint while still recovering automatically.
@@ -123,12 +125,12 @@ class EnhancedLLM:
         self.primary_config   = ModelConfig("llama-3.3-70b-versatile", temperature=0.1, max_tokens=4096)
         self.secondary_config = ModelConfig("llama-3.1-70b-versatile",  temperature=0.1, max_tokens=4096)
 
-        # Ordered by preference: high-quality first, then smaller/faster models.
-        # mixtral-8x7b-32768 was removed from Groq in early 2025 — replaced with llama3-70b-8192.
+        # Only models with confirmed Groq tool-calling support are included here.
+        # gemma2-9b-it and llama3-70b-8192 were removed: they ignore bind_tools() on Groq,
+        # causing the agent to stall silently when rate limits push the app to those fallbacks.
         self.fallback_configs = [
-            ModelConfig("llama3-70b-8192",       temperature=0.1, max_tokens=4096),
-            ModelConfig("llama-3.1-8b-instant",  temperature=0.1, max_tokens=2048),
-            ModelConfig("gemma2-9b-it",           temperature=0.1, max_tokens=2048),
+            ModelConfig("llama-3.1-8b-instant",                temperature=0.1, max_tokens=2048),
+            ModelConfig("llama3-groq-8b-8192-tool-use-preview", temperature=0.1, max_tokens=2048),
         ]
 
         self.current_config = self.primary_config

@@ -204,13 +204,20 @@ class StreamlitChatbot:
                 node = metadata.get("langgraph_node", "")
                 if node == "enhanced_tools" and isinstance(chunk, ToolMessage):
                     yield f"\n*Searching with {chunk.name}...*\n\n"
-                elif (
-                    node == "context_llm"
-                    and isinstance(chunk, AIMessageChunk)
-                    and chunk.content
-                    and not getattr(chunk, "tool_call_chunks", None)
-                ):
-                    yield chunk.content
+                elif node == "context_llm":
+                    if (
+                        isinstance(chunk, AIMessageChunk)
+                        and chunk.content
+                        # tool_call_chunks are the LLM deciding which tool to call —
+                        # skip those; we only want the final human-readable answer tokens
+                        and not getattr(chunk, "tool_call_chunks", None)
+                    ):
+                        yield chunk.content
+                    elif isinstance(chunk, AIMessage) and chunk.content:
+                        # The error handler in context_aware_llm returns a complete AIMessage
+                        # (not streamed chunks) when all models fail. LangGraph emits it as
+                        # AIMessage, not AIMessageChunk, so it needs its own branch here.
+                        yield chunk.content
         except Exception as e:
             yield f"\n\nError: {str(e)}"
 
