@@ -11,7 +11,7 @@ langgraph>=0.2.0
 # Research and search tools
 arxiv>=1.4.0
 wikipedia>=1.4.0
-tavily-python>=0.3.0
+tavily-python>=0.3.0,<0.4.0
 ddgs>=0.1.0
 
 # Utilities

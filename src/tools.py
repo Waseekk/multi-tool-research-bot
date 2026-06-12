@@ -208,7 +208,7 @@ def file_content_generator(file_type: str, content_description: str) -> str:
 # ---------------------------------------------------------------------------
 
 @tool
-def semantic_scholar_search(query: str, limit: int = 5) -> str:
+def semantic_scholar_search(query: str) -> str:
     """
     Search Semantic Scholar for academic papers across all scientific fields.
     Especially useful for citation counts and cross-field research impact.
@@ -217,15 +217,15 @@ def semantic_scholar_search(query: str, limit: int = 5) -> str:
 
     Args:
         query: Search terms (e.g. "transformer attention mechanism")
-        limit: Number of results (default 5, max 10)
 
     Returns:
-        Formatted list of papers with title, authors, year, citation count, and abstract
+        Formatted list of top 5 papers with title, authors, year, citation count, and abstract
     """
     import requests
     try:
-        # LLMs sometimes pass limit as a string despite the int type hint
-        limit = int(limit)
+        # limit removed from signature: LLMs pass it as a string, causing Groq schema validation
+        # to reject the tool call before it reaches this code. Hardcoded to 5 instead.
+        limit = 5
         resp = requests.get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
             params={
@@ -268,7 +268,7 @@ def semantic_scholar_search(query: str, limit: int = 5) -> str:
 
 
 @tool
-def openalex_search(query: str, limit: int = 5) -> str:
+def openalex_search(query: str) -> str:
     """
     Search OpenAlex for scholarly works across all academic disciplines.
     OpenAlex is a fully open, free catalog of global research output.
@@ -278,15 +278,14 @@ def openalex_search(query: str, limit: int = 5) -> str:
 
     Args:
         query: Search terms
-        limit: Number of results (default 5, max 10)
 
     Returns:
-        Formatted list of works with title, authors, year, citations, and open-access URL if available
+        Formatted list of top 5 works with title, authors, year, citations, and open-access URL if available
     """
     import requests
     try:
-        # LLMs sometimes pass limit as a string despite the int type hint
-        limit = int(limit)
+        # limit removed from signature: same reason as semantic_scholar_search above
+        limit = 5
         resp = requests.get(
             "https://api.openalex.org/works",
             params={
