@@ -33,8 +33,7 @@ venv.bak/
 .env.local
 .env.production
 
-# Streamlit
-.streamlit/
+# Streamlit — track config.toml (app settings), never track secrets.toml (API keys)
 .streamlit/secrets.toml
 
 
