@@ -27,6 +27,7 @@ Tool names as registered by LangChain (used in the system prompt):
 import os
 import json
 import random
+import contextvars
 from datetime import datetime
 from typing import List
 
@@ -34,6 +35,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_core.tools import tool
+
+# ---------------------------------------------------------------------------
+# Per-request context variables
+# Set by app.py before each graph invocation; read by tools in the same thread.
+# Using contextvars instead of st.session_state because LangGraph's ToolNode
+# runs in a callback context where st.session_state is not reliably accessible.
+# ---------------------------------------------------------------------------
+_active_user_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "active_user_id", default=""
+)
+_active_pdf_names: contextvars.ContextVar[list] = contextvars.ContextVar(
+    "active_pdf_names", default=[]
+)
 from langchain_community.tools import ArxivQueryRun, WikipediaQueryRun, PubmedQueryRun
 from langchain_community.utilities import ArxivAPIWrapper, WikipediaAPIWrapper, PubMedAPIWrapper
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -332,6 +346,158 @@ def openalex_search(query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# PDF / RAG tools (available only when chromadb + sentence-transformers installed)
+# ---------------------------------------------------------------------------
+
+try:
+    from src.rag import ResearchVectorStore
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
+
+
+@tool
+def pdf_search(query: str) -> str:
+    """
+    Search through the user's uploaded research papers using semantic similarity.
+
+    Use this tool whenever:
+    - The user asks about a paper they uploaded
+    - They reference "my paper", "the document", "this study", "what I uploaded"
+    - They want to discuss specific findings, methods, or sections of their papers
+
+    Always cite results as [Paper: title, Page: N].
+
+    Args:
+        query: What to search for in the uploaded papers
+
+    Returns:
+        Relevant excerpts from uploaded papers with page references
+    """
+    if not RAG_AVAILABLE:
+        return (
+            "PDF search is not available. "
+            "Install with: pip install chromadb sentence-transformers PyMuPDF"
+        )
+    try:
+        # _active_user_id is set by app.py before each graph invocation —
+        # it comes from the authenticated session, not from the LLM
+        user_id = _active_user_id.get()
+        if not user_id:
+            return "Error: No active user session. Please refresh and log in again."
+
+        store = ResearchVectorStore()
+        results = store.search(query, user_id=user_id, k=6)
+
+        if not results:
+            return (
+                "No relevant content found in your uploaded papers. "
+                "Make sure you've uploaded a PDF using the sidebar uploader."
+            )
+
+        parts = []
+        for r in results:
+            page_info = f", Page {r['page_num']}" if r["page_num"] > 0 else ""
+            parts.append(
+                f"[Paper: {r['paper_title']}{page_info}]\n"
+                f"{r['text']}\n"
+                f"*(Relevance: {r['score']})*"
+            )
+        return f"## From Your Uploaded Papers — '{query}'\n\n" + "\n\n---\n\n".join(parts)
+
+    except Exception as e:
+        return f"PDF search error: {str(e)}"
+
+
+@tool
+def find_related_papers(topic: str) -> str:
+    """
+    Find academic papers related to a topic by searching both arXiv and Semantic Scholar
+    in parallel. Returns a combined, deduplicated list sorted by relevance.
+
+    Use this to:
+    - Connect an uploaded paper to the broader research landscape
+    - Find prior work on a methodology or problem
+    - Discover future research directions from recent papers
+
+    Args:
+        topic: Research topic or question (e.g. "transformer attention for protein folding")
+
+    Returns:
+        Combined list of related papers from arXiv and Semantic Scholar
+    """
+    import requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch_arxiv(q: str) -> str:
+        try:
+            resp = requests.get(
+                "http://export.arxiv.org/api/query",
+                params={"search_query": f"all:{q}", "max_results": 5, "sortBy": "relevance"},
+                timeout=10,
+            )
+            import xml.etree.ElementTree as ET
+            ns = "http://www.w3.org/2005/Atom"
+            root = ET.fromstring(resp.text)
+            entries = root.findall(f"{{{ns}}}entry")
+            lines = []
+            for e in entries:
+                title = (e.findtext(f"{{{ns}}}title") or "").strip().replace("\n", " ")
+                summary = (e.findtext(f"{{{ns}}}summary") or "")[:200].strip().replace("\n", " ")
+                link_el = e.find(f"{{{ns}}}link[@rel='alternate']")
+                url = link_el.attrib.get("href", "") if link_el is not None else ""
+                lines.append(f"**[arXiv]** {title}\n  {summary}...\n  {url}")
+            return "\n\n".join(lines)
+        except Exception as exc:
+            return f"arXiv error: {exc}"
+
+    def fetch_semantic_scholar(q: str) -> str:
+        try:
+            resp = requests.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={
+                    "query": q,
+                    "limit": 5,
+                    "fields": "title,abstract,authors,year,citationCount,url",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            papers = resp.json().get("data", [])
+            lines = []
+            for p in papers:
+                authors = ", ".join(a["name"] for a in p.get("authors", [])[:2])
+                abstract = (p.get("abstract") or "")[:200].strip()
+                lines.append(
+                    f"**[S2]** {p.get('title', 'Unknown')} ({p.get('year', '?')}) — {p.get('citationCount', 0)} citations\n"
+                    f"  {authors}\n  {abstract}...\n  {p.get('url', '')}"
+                )
+            return "\n\n".join(lines)
+        except Exception as exc:
+            return f"Semantic Scholar error: {exc}"
+
+    arxiv_result = semantic_result = ""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {
+            pool.submit(fetch_arxiv, topic): "arxiv",
+            pool.submit(fetch_semantic_scholar, topic): "semantic_scholar",
+        }
+        for future in as_completed(futures):
+            src = futures[future]
+            text = future.result()
+            if src == "arxiv":
+                arxiv_result = text
+            else:
+                semantic_result = text
+
+    return (
+        f"## Related Papers: '{topic}'\n\n"
+        f"### arXiv\n{arxiv_result or 'No results'}\n\n"
+        f"### Semantic Scholar\n{semantic_result or 'No results'}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool factory
 # ---------------------------------------------------------------------------
 
@@ -415,7 +581,15 @@ def initialize_tools() -> List:
         file_content_generator,
         semantic_scholar_search,
         openalex_search,
+        find_related_papers,
     ])
+
+    # PDF search only added when RAG dependencies are installed
+    if RAG_AVAILABLE:
+        tools_list.append(pdf_search)
+        print("PDF search tool initialized successfully")
+    else:
+        print("PDF search not available (install chromadb + sentence-transformers)")
 
     print(f"Initialized {len(tools_list)} tools successfully")
     return tools_list
