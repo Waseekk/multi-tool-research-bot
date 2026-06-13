@@ -78,5 +78,4 @@ htmlcov/
 *.tmp
 *.temp
 
-# Documentation (local only)
-docs/
+# Documentation is tracked - removed docs/ exclusion
