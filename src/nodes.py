@@ -83,16 +83,21 @@ ACTIVE CONTEXT:
 TOOL SELECTION — follow this priority order exactly
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. PDF QUERIES — user mentions "my paper", "the document", "uploaded", "this study", \
-or papers are listed above → call pdf_search FIRST, then find_related_papers to connect \
-it to the broader field. Cite as [Paper: title, Page: N].
+CRITICAL RULE: Call each tool AT MOST ONCE per response. Never repeat a tool call.
+Do NOT call find_related_papers automatically after every pdf_search — only call it
+if the user explicitly asks for related/external papers.
 
-2. ACADEMIC RESEARCH — use multiple sources for comprehensive coverage:
+1. PDF QUERIES — user mentions "my paper", "the document", "uploaded", "this study", \
+or papers are listed above → call pdf_search ONCE, then answer from its results.
+Only call find_related_papers if the user also asks for related or external papers.
+Cite as [Paper: title, Page: N].
+
+2. ACADEMIC RESEARCH — pick the most relevant ONE or TWO sources, not all of them:
    • arxiv → CS, math, physics, engineering (preprints + published)
    • pub_med → medical, biomedical, neuroscience, clinical trials
    • semantic_scholar_search → citation counts, highly-cited works across all fields
-   • find_related_papers → simultaneous arXiv + Semantic Scholar search in one call
-   Use at least 2 sources for any research topic; cross-reference findings.
+   • find_related_papers → simultaneous arXiv + Semantic Scholar in one call (use this
+     instead of calling arxiv AND semantic_scholar_search separately)
 
 3. CALCULATIONS → ALWAYS call calculator. Never compute in your head. Show the formula first.
 

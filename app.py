@@ -251,7 +251,7 @@ class StreamlitChatbot:
     def chat(self, message: str, thread_id: str = "default") -> str:
         """Non-streaming invoke (sidebar example buttons)."""
         try:
-            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
+            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 5}
             result = self.graph.invoke(self._initial_state(message), config)
             ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
             return ai_msgs[-1].content if ai_msgs else "I couldn't generate a response. Please try again."
@@ -266,7 +266,7 @@ class StreamlitChatbot:
         - AIMessageChunk with text content → yields the token
         - Complete AIMessage → error handler response, yielded whole
         """
-        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 5}
         st.session_state._last_tools_used = []
         try:
             for chunk, _ in self.graph.stream(
@@ -458,15 +458,21 @@ def main():
             unsafe_allow_html=True,
         )
 
-        with st.expander("🔑 OpenAI API Key", expanded=not active_openai):
-            st.caption("Get a key at [platform.openai.com](https://platform.openai.com/) — GPT-4o, most capable.")
+        # Dropdown to choose which provider key to configure
+        key_provider = st.selectbox(
+            "Configure API key for:",
+            ["🔑 OpenAI (GPT-4o — Recommended)", "⚡ Groq (Free tier / Fallback)"],
+            index=0,
+            label_visibility="visible",
+            key="key_provider_select",
+        )
+
+        if "OpenAI" in key_provider:
+            st.caption("Get a key at [platform.openai.com](https://platform.openai.com/)")
             new_openai = st.text_input(
-                "OpenAI key",
-                type="password",
-                placeholder="sk-proj-...",
+                "OpenAI key", type="password", placeholder="sk-proj-...",
                 value=st.session_state.get("user_openai_key", ""),
-                label_visibility="collapsed",
-                key="openai_key_input",
+                label_visibility="collapsed", key="openai_key_input",
             )
             c1, c2 = st.columns(2)
             with c1:
@@ -477,21 +483,17 @@ def main():
                         st.session_state.pop("chatbot", None)
                     st.rerun()
             with c2:
-                if st.button("Remove", key="remove_openai", use_container_width=True):
+                if st.button("Clear", key="remove_openai", use_container_width=True):
                     st.session_state.user_openai_key = ""
                     st.session_state.pop("chatbot_initialized", None)
                     st.session_state.pop("chatbot", None)
                     st.rerun()
-
-        with st.expander("⚡ Groq API Key (fallback)", expanded=not active_groq and not active_openai):
-            st.caption("Free at [console.groq.com](https://console.groq.com/) — used as fallback or primary.")
+        else:
+            st.caption("Free at [console.groq.com](https://console.groq.com/)")
             new_groq = st.text_input(
-                "Groq key",
-                type="password",
-                placeholder="gsk_...",
+                "Groq key", type="password", placeholder="gsk_...",
                 value=st.session_state.get("user_groq_key", ""),
-                label_visibility="collapsed",
-                key="groq_key_input",
+                label_visibility="collapsed", key="groq_key_input",
             )
             c1, c2 = st.columns(2)
             with c1:
@@ -502,7 +504,7 @@ def main():
                         st.session_state.pop("chatbot", None)
                     st.rerun()
             with c2:
-                if st.button("Remove", key="remove_groq", use_container_width=True):
+                if st.button("Clear", key="remove_groq", use_container_width=True):
                     st.session_state.user_groq_key = ""
                     st.session_state.pop("chatbot_initialized", None)
                     st.session_state.pop("chatbot", None)
@@ -510,14 +512,14 @@ def main():
 
         st.markdown("---")
 
-        # ── Loaded Papers section ─────────────────────────────────────────
-        st.markdown("### 📄 Loaded Papers")
+        # ── Loaded Papers section (only shown when papers are loaded) ────────
         loaded = st.session_state.get("uploaded_pdfs", {})
         if loaded:
+            st.markdown("---")
+            st.markdown("### 📄 Loaded Papers")
             for pdf_name, pdf_info in list(loaded.items()):
                 c1, c2 = st.columns([5, 1])
                 with c1:
-                    title = pdf_info.get("title", pdf_name) if isinstance(pdf_info, dict) else pdf_name
                     st.markdown(f"**{pdf_name}**")
                     if isinstance(pdf_info, dict):
                         st.caption(f"{pdf_info.get('pages','?')} pages · {pdf_info.get('chunks','?')} chunks")
@@ -530,8 +532,6 @@ def main():
                             pass
                         del st.session_state.uploaded_pdfs[pdf_name]
                         st.rerun()
-        else:
-            st.caption("No papers loaded. Use the upload panel above the chat.")
 
         st.markdown("---")
 
