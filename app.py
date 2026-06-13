@@ -44,7 +44,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.tools import initialize_tools
 from src.models import EnhancedLLM, ConversationState
-from src.nodes import create_enhanced_nodes
+from src.nodes import create_agent_nodes, route_after_supervisor
 from src.conversation import ConversationManager
 from src.auth import (
     init_db, login_user, register_user,
@@ -202,27 +202,54 @@ class StreamlitChatbot:
 
     def _build_graph(self) -> StateGraph:
         """
-        Assembles the LangGraph ReAct loop:
-          conversation_manager → context_llm ⇄ enhanced_tools → END
+        Multi-agent LangGraph graph:
+          conversation_manager -> supervisor -> research_agent <-> research_tools
+                                            -> pdf_agent      <-> pdf_tools
 
-        tools_condition routes to enhanced_tools when the LLM requests tool calls,
-        or to END when it produces a plain text response.
+        The supervisor is a fast keyword router (no LLM call). Each agent has its
+        own isolated ToolNode so it can only call the tools it was designed for.
         """
-        context_llm, enhanced_tools = create_enhanced_nodes(self.tools, self.llm_manager)
+        (
+            supervisor,
+            _route,
+            research_agent,
+            pdf_agent,
+            research_tools,
+            pdf_tools,
+        ) = create_agent_nodes(self.tools, self.llm_manager)
 
         builder = StateGraph(ConversationState)
         builder.add_node("conversation_manager", self._manage_conversation)
-        builder.add_node("context_llm",          context_llm)
-        builder.add_node("enhanced_tools",        enhanced_tools)
+        builder.add_node("supervisor",           supervisor)
+        builder.add_node("research_agent",       research_agent)
+        builder.add_node("pdf_agent",            pdf_agent)
+        builder.add_node("research_tools",       research_tools)
+        builder.add_node("pdf_tools",            pdf_tools)
 
         builder.add_edge(START, "conversation_manager")
-        builder.add_edge("conversation_manager", "context_llm")
+        builder.add_edge("conversation_manager", "supervisor")
+
         builder.add_conditional_edges(
-            "context_llm",
-            tools_condition,
-            {"tools": "enhanced_tools", "__end__": END},
+            "supervisor",
+            route_after_supervisor,
+            {"research_agent": "research_agent", "pdf_agent": "pdf_agent"},
         )
-        builder.add_edge("enhanced_tools", "context_llm")
+
+        # Research agent ReAct loop
+        builder.add_conditional_edges(
+            "research_agent",
+            tools_condition,
+            {"tools": "research_tools", "__end__": END},
+        )
+        builder.add_edge("research_tools", "research_agent")
+
+        # PDF agent ReAct loop
+        builder.add_conditional_edges(
+            "pdf_agent",
+            tools_condition,
+            {"tools": "pdf_tools", "__end__": END},
+        )
+        builder.add_edge("pdf_tools", "pdf_agent")
 
         return builder.compile(checkpointer=self.memory)
 
@@ -230,26 +257,30 @@ class StreamlitChatbot:
         messages = self.conversation_manager.trim_history(state["messages"])
         summary  = self.conversation_manager.summarize_conversation(messages)
         return {
-            "messages":            messages,
+            "messages":             messages,
             "conversation_summary": summary,
-            "user_context":        state.get("user_context", {}),
-            "tool_results_cache":  state.get("tool_results_cache", {}),
-            "error_count":         state.get("error_count", 0),
-            "last_tool_used":      state.get("last_tool_used", ""),
-            "current_model_used":  state.get("current_model_used", ""),
-            "model_switch_count":  state.get("model_switch_count", 0),
+            "user_context":         state.get("user_context", {}),
+            "tool_results_cache":   state.get("tool_results_cache", {}),
+            "error_count":          state.get("error_count", 0),
+            "last_tool_used":       state.get("last_tool_used", ""),
+            "current_model_used":   state.get("current_model_used", ""),
+            "model_switch_count":   state.get("model_switch_count", 0),
+            "current_agent":        state.get("current_agent", ""),
+            "active_pdfs":          state.get("active_pdfs", []),
         }
 
     def _initial_state(self, message: str) -> dict:
         return {
-            "messages":            [HumanMessage(content=message)],
-            "user_context":        {},
-            "tool_results_cache":  {},
+            "messages":             [HumanMessage(content=message)],
+            "user_context":         {},
+            "tool_results_cache":   {},
             "conversation_summary": "",
-            "error_count":         0,
-            "last_tool_used":      "",
-            "current_model_used":  "",
-            "model_switch_count":  0,
+            "error_count":          0,
+            "last_tool_used":       "",
+            "current_model_used":   "",
+            "model_switch_count":   0,
+            "current_agent":        "",
+            "active_pdfs":          [],
         }
 
     def chat(self, message: str, thread_id: str = "default") -> str:
@@ -281,10 +312,18 @@ class StreamlitChatbot:
         """
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
         st.session_state._last_tools_used = []
+        _announced_agent = set()   # track which agents we've already announced
         try:
-            for chunk, _ in self.graph.stream(
+            for chunk, metadata in self.graph.stream(
                 self._initial_state(message), config, stream_mode="messages"
             ):
+                # Show a one-time routing badge for whichever agent handles this query
+                node = metadata.get("langgraph_node", "")
+                if node in ("research_agent", "pdf_agent") and node not in _announced_agent:
+                    label = "Research Agent" if node == "research_agent" else "PDF Agent"
+                    yield f"*Using **{label}**...*\n\n"
+                    _announced_agent.add(node)
+
                 if isinstance(chunk, ToolMessage):
                     name = getattr(chunk, "name", None) or "tool"
                     if name not in st.session_state._last_tools_used:

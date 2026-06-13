@@ -11,13 +11,14 @@ __email__ = "your.email@example.com"
 
 from .tools import initialize_tools
 from .models import ConversationState, EnhancedLLM
-from .nodes import create_enhanced_nodes
+from .nodes import create_agent_nodes, route_after_supervisor
 from .conversation import ConversationManager
 
 __all__ = [
     "initialize_tools",
-    "ConversationState", 
+    "ConversationState",
     "EnhancedLLM",
-    "create_enhanced_nodes",
-    "ConversationManager"
+    "create_agent_nodes",
+    "route_after_supervisor",
+    "ConversationManager",
 ]
