@@ -19,6 +19,19 @@ python-dotenv>=1.0.0
 typing-extensions>=4.8.0
 xmltodict>=0.13.0
 
+# Auth
+bcrypt>=4.0.0
+
+# PDF processing
+PyMuPDF>=1.24.0
+
+# Vector DB and embeddings (first use downloads ~420 MB embedding model)
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# OpenAI provider (GPT-4o primary)
+langchain-openai>=0.1.0
+
 # Optional: For enhanced features
 requests>=2.31.0
 beautifulsoup4>=4.12.0

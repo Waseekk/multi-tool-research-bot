@@ -16,122 +16,200 @@ Architecture:
     ├── _initial_state()       — builds the ConversationState dict for each new message
     ├── chat()                 — non-streaming invoke (used by sidebar example buttons)
     └── stream_response()      — streaming generator (used by main chat input)
-
-Modules this file depends on:
-  src/tools.py       — initialize_tools()
-  src/models.py      — EnhancedLLM, ConversationState
-  src/nodes.py       — create_enhanced_nodes()
-  src/conversation.py — ConversationManager
 """
 
 import streamlit as st
 import os
+import base64
+import uuid
 from typing import List, Dict, Any
-import json
 from datetime import datetime
 
-# Handles local .env file; environment variables set here are visible to all modules
 from dotenv import load_dotenv
 load_dotenv()
 
-# For Streamlit Cloud: Load secrets if available
-if hasattr(st, 'secrets'):
+# Streamlit Cloud secrets (sets env vars before any module reads them)
+if hasattr(st, "secrets"):
     try:
-        # Set environment variables from Streamlit secrets
-        if 'GROQ_API_KEY' in st.secrets:
-            os.environ['GROQ_API_KEY'] = st.secrets['GROQ_API_KEY']
-        if 'TAVILY_API_KEY' in st.secrets:
-            os.environ['TAVILY_API_KEY'] = st.secrets['TAVILY_API_KEY']
-    except Exception as e:
-        pass  # Secrets not configured yet
+        for key in ("GROQ_API_KEY", "OPENAI_API_KEY", "TAVILY_API_KEY"):
+            if key in st.secrets:
+                os.environ[key] = st.secrets[key]
+    except Exception:
+        pass
 
-# LangChain and LangGraph imports
-import uuid
 from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, AIMessageChunk, ToolMessage, SystemMessage
-from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 
-# Import our custom modules (from src package)
 from src.tools import initialize_tools
 from src.models import EnhancedLLM, ConversationState
 from src.nodes import create_enhanced_nodes
 from src.conversation import ConversationManager
+from src.auth import (
+    init_db, login_user, register_user,
+    is_daily_limit_reached, increment_chat_count,
+    get_chat_count_today, DAILY_LIMIT,
+)
+from src.tools import _active_user_id, _active_pdf_names
 
-# Page config
+init_db()
+
 st.set_page_config(
-    page_title="Multi-Tool Research Bot",
-    page_icon="🤖",
+    page_title="Research Intelligence Assistant",
+    page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom CSS for better UI
+# ---------------------------------------------------------------------------
+# Global CSS — minimal, reliable selectors only
+# ---------------------------------------------------------------------------
 st.markdown("""
 <style>
-    .stChatMessage {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
+    /* Reduce default top padding so the hero sits higher */
+    .main .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+
+    /* Buttons: rounded corners, smooth hover */
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 500;
+        transition: opacity 0.15s ease, box-shadow 0.15s ease;
     }
-    .main > div {
-        padding-top: 2rem;
-    }
-    .stButton button {
-        width: 100%;
-    }
+    .stButton > button:hover { opacity: 0.88; }
+
+    /* Chat message cards */
+    [data-testid="stChatMessage"] { border-radius: 12px; }
+
+    /* Text inputs */
+    .stTextInput input, .stTextArea textarea { border-radius: 8px; }
+
+    /* Expander borders */
+    .stExpander { border-radius: 8px; }
+
+    /* Horizontal rules */
+    hr { margin: 10px 0; opacity: 0.3; }
 </style>
 """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Tool badge colours
+# ---------------------------------------------------------------------------
+TOOL_COLORS = {
+    "arxiv":                      "#2196F3",
+    "pub_med":                    "#4CAF50",
+    "wikipedia":                  "#FF9800",
+    "duckduckgo_search":          "#9C27B0",
+    "tavily_search_results_json": "#673AB7",
+    "calculator":                 "#F44336",
+    "semantic_scholar_search":    "#00BCD4",
+    "openalex_search":            "#009688",
+    "code_analyzer":              "#795548",
+    "weather_info":               "#03A9F4",
+    "file_content_generator":     "#607D8B",
+    "pdf_search":                 "#E91E63",
+    "find_related_papers":        "#FF5722",
+}
+
+
+def render_tool_badges(tool_names: list) -> str:
+    """Return HTML for a row of colored pill badges, one per tool used."""
+    if not tool_names:
+        return ""
+    badges = []
+    for name in tool_names:
+        color = TOOL_COLORS.get(name, "#9E9E9E")
+        label = name.replace("_", " ").replace("tavily search results json", "tavily").title()
+        badges.append(
+            f'<span style="background:{color};color:white;padding:2px 10px;'
+            f'border-radius:12px;font-size:0.73em;margin:2px;display:inline-block;'
+            f'font-weight:500">{label}</span>'
+        )
+    return '<div style="margin-top:6px;line-height:2">' + " ".join(badges) + "</div>"
+
+
+def render_copy_btn(text: str, btn_key: str) -> None:
+    """
+    Small ⧉ Copy button rendered via st.components.v1.html.
+
+    Uses document.execCommand('copy') with a hidden textarea — this works inside
+    Streamlit's iframe sandbox where navigator.clipboard may be restricted.
+    Text is base64-encoded to avoid any quoting / escaping issues.
+    """
+    b64 = base64.b64encode(text.encode("utf-8")).decode()
+    st.components.v1.html(f"""
+    <div style="display:flex;justify-content:flex-end;padding:2px 0 0">
+      <button id="cpb_{btn_key}"
+        onclick="(function(enc){{
+          var ta=document.createElement('textarea');
+          ta.value=atob(enc);
+          ta.style.cssText='position:fixed;top:-9999px;left:-9999px';
+          document.body.appendChild(ta);ta.focus();ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          var b=document.getElementById('cpb_{btn_key}');
+          b.textContent='✓ Copied';
+          b.style.color='#22c55e';b.style.borderColor='#22c55e';
+          setTimeout(function(){{
+            b.textContent='⧉ Copy';
+            b.style.color='#64748b';b.style.borderColor='#334155';
+          }},2000);
+        }})('{b64}')"
+        title="Copy response to clipboard"
+        style="background:transparent;border:1px solid #334155;border-radius:6px;
+               color:#64748b;cursor:pointer;font-size:11.5px;padding:3px 10px;
+               font-family:system-ui,sans-serif;letter-spacing:0.2px;
+               transition:all 0.2s;white-space:nowrap">
+        &#x29c9; Copy
+      </button>
+    </div>
+    """, height=32)
+
+
+# ---------------------------------------------------------------------------
+# Chatbot class
+# ---------------------------------------------------------------------------
 
 class StreamlitChatbot:
     """
     Wraps the LangGraph compiled graph and exposes chat/stream interfaces to the UI.
 
-    Streamlit reruns the entire script on every user interaction, so the chatbot
-    must be stored in `st.session_state` to survive across reruns. On the first
-    load we initialize everything and cache it; on subsequent reruns we restore
-    from session state rather than rebuilding the graph and reloading tools.
+    Stored in st.session_state so it survives Streamlit reruns without rebuilding
+    the graph (which would lose MemorySaver conversation history).
     """
 
     def __init__(self):
         if "chatbot_initialized" not in st.session_state:
-            with st.spinner("Initializing chatbot and loading tools..."):
-                self.tools = initialize_tools()
-                self.llm_manager = EnhancedLLM()
+            with st.spinner("Initializing Research Intelligence Assistant..."):
+                self.tools               = initialize_tools()
+                self.llm_manager         = EnhancedLLM()
                 self.conversation_manager = ConversationManager()
-                # MemorySaver stores conversation checkpoints in memory (no DB needed).
-                # Each thread_id gets its own isolated message history.
-                self.memory = MemorySaver()
-                self.graph = self._build_graph()
+                self.memory              = MemorySaver()
+                self.graph               = self._build_graph()
                 st.session_state.chatbot_initialized = True
                 st.session_state.chatbot = self
         else:
-            chatbot = st.session_state.chatbot
-            self.tools = chatbot.tools
-            self.llm_manager = chatbot.llm_manager
+            chatbot                  = st.session_state.chatbot
+            self.tools               = chatbot.tools
+            self.llm_manager         = chatbot.llm_manager
             self.conversation_manager = chatbot.conversation_manager
-            self.memory = chatbot.memory
-            self.graph = chatbot.graph
-    
+            self.memory              = chatbot.memory
+            self.graph               = chatbot.graph
+
     def _build_graph(self) -> StateGraph:
         """
         Assembles the LangGraph ReAct loop:
+          conversation_manager → context_llm ⇄ enhanced_tools → END
 
-          conversation_manager -> context_llm -> (tools? -> context_llm -> ...) -> END
-
-        tools_condition is LangGraph's built-in router: it reads the last AI message
-        and routes to "enhanced_tools" if it contains tool call requests, or to END
-        if it's a plain text response. This loop continues until the LLM stops
-        requesting tools, at which point it streams the final answer.
+        tools_condition routes to enhanced_tools when the LLM requests tool calls,
+        or to END when it produces a plain text response.
         """
         context_llm, enhanced_tools = create_enhanced_nodes(self.tools, self.llm_manager)
 
         builder = StateGraph(ConversationState)
         builder.add_node("conversation_manager", self._manage_conversation)
-        builder.add_node("context_llm", context_llm)
-        builder.add_node("enhanced_tools", enhanced_tools)
+        builder.add_node("context_llm",          context_llm)
+        builder.add_node("enhanced_tools",        enhanced_tools)
 
         builder.add_edge(START, "conversation_manager")
         builder.add_edge("conversation_manager", "context_llm")
@@ -143,246 +221,493 @@ class StreamlitChatbot:
         builder.add_edge("enhanced_tools", "context_llm")
 
         return builder.compile(checkpointer=self.memory)
-    
+
     def _manage_conversation(self, state: ConversationState) -> ConversationState:
-        """Manage conversation context with enhanced tracking"""
         messages = self.conversation_manager.trim_history(state["messages"])
-        summary = self.conversation_manager.summarize_conversation(messages)
-        
+        summary  = self.conversation_manager.summarize_conversation(messages)
         return {
-            "messages": messages,
+            "messages":            messages,
             "conversation_summary": summary,
-            "user_context": state.get("user_context", {}),
-            "tool_results_cache": state.get("tool_results_cache", {}),
-            "error_count": state.get("error_count", 0),
-            "last_tool_used": state.get("last_tool_used", ""),
-            "current_model_used": state.get("current_model_used", ""),
-            "model_switch_count": state.get("model_switch_count", 0)
+            "user_context":        state.get("user_context", {}),
+            "tool_results_cache":  state.get("tool_results_cache", {}),
+            "error_count":         state.get("error_count", 0),
+            "last_tool_used":      state.get("last_tool_used", ""),
+            "current_model_used":  state.get("current_model_used", ""),
+            "model_switch_count":  state.get("model_switch_count", 0),
         }
-    
+
     def _initial_state(self, message: str) -> dict:
         return {
-            "messages": [HumanMessage(content=message)],
-            "user_context": {},
-            "tool_results_cache": {},
+            "messages":            [HumanMessage(content=message)],
+            "user_context":        {},
+            "tool_results_cache":  {},
             "conversation_summary": "",
-            "error_count": 0,
-            "last_tool_used": "",
-            "current_model_used": "",
-            "model_switch_count": 0,
+            "error_count":         0,
+            "last_tool_used":      "",
+            "current_model_used":  "",
+            "model_switch_count":  0,
         }
 
     def chat(self, message: str, thread_id: str = "default") -> str:
-        """Non-streaming chat — used for sidebar example buttons"""
+        """Non-streaming invoke (sidebar example buttons)."""
         try:
-            # recursion_limit prevents infinite tool-calling loops where a weak
-            # fallback model keeps re-calling tools instead of writing a final answer
             config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
             result = self.graph.invoke(self._initial_state(message), config)
-            ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
-            return ai_messages[-1].content if ai_messages else "I couldn't generate a response. Please try again."
+            ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
+            return ai_msgs[-1].content if ai_msgs else "I couldn't generate a response. Please try again."
         except Exception as e:
-            return f"Error: {str(e)}. Please check your API keys and try again."
+            return f"Error: {e}. Please check your API keys and try again."
 
     def stream_response(self, message: str, thread_id: str = "default"):
         """
-        Yields string chunks suitable for st.write_stream (token-by-token streaming).
+        Yields string chunks for st.write_stream (token-by-token streaming).
 
-        Two types of chunks are emitted:
-        1. Tool indicator — ToolMessage signals a tool just ran; we yield a brief italic
-           line so the user sees progress instead of a blank screen during multi-second
-           API calls (e.g. ArXiv searches).
-        2. LLM tokens — AIMessageChunk with text content. We skip chunks that only carry
-           tool_call_chunks (the LLM choosing which tool to call) and surface only the
-           final human-readable answer tokens.
-
-        NOTE: We intentionally do NOT filter by langgraph_node name. The metadata key
-        "langgraph_node" changed or is absent in some LangGraph versions, which caused
-        every chunk to be silently dropped on tool-using queries. Filtering by message
-        type alone is sufficient and more robust across versions:
-          - ToolMessage       → only ever comes from the tool execution node
-          - AIMessageChunk    → only streamed by LLM nodes (conversation_manager and
-                                enhanced_tools never call an LLM)
-          - AIMessage (whole) → returned by the error handler when all models fail
+        - ToolMessage  → yields a brief italic progress line so the UI isn't blank
+        - AIMessageChunk with text content → yields the token
+        - Complete AIMessage → error handler response, yielded whole
         """
-        # recursion_limit prevents infinite tool-calling loops where a weak
-        # fallback model keeps re-calling tools instead of writing a final answer
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 10}
+        st.session_state._last_tools_used = []
         try:
-            for chunk, metadata in self.graph.stream(
+            for chunk, _ in self.graph.stream(
                 self._initial_state(message), config, stream_mode="messages"
             ):
                 if isinstance(chunk, ToolMessage):
-                    # Show a progress indicator while the tool runs so the UI isn't blank
-                    yield f"\n*Searching with {chunk.name}...*\n\n"
+                    name = getattr(chunk, "name", None) or "tool"
+                    if name not in st.session_state._last_tools_used:
+                        st.session_state._last_tools_used.append(name)
+                    yield f"\n*Searching with **{name}**...*\n\n"
                 elif (
                     isinstance(chunk, AIMessageChunk)
                     and chunk.content
-                    # tool_call_chunks = LLM deciding which tool to call; skip those
                     and not getattr(chunk, "tool_call_chunks", None)
                 ):
                     yield chunk.content
                 elif isinstance(chunk, AIMessage) and chunk.content:
-                    # The all-models-failed error handler returns a complete AIMessage,
-                    # not streamed chunks — catch it here so it isn't silently dropped
+                    # All-models-failed error handler returns a complete AIMessage
                     yield chunk.content
         except Exception as e:
-            yield f"\n\nError: {str(e)}"
+            yield f"\n\nError: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Auth page
+# ---------------------------------------------------------------------------
+
+def _show_auth_page() -> None:
+    """Login / register screen shown when no active session exists."""
+    # Hero
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 60%,#0f172a 100%);
+                border:1px solid rgba(59,130,246,0.25);border-radius:16px;
+                padding:32px 36px;margin-bottom:28px;text-align:center">
+        <div style="font-size:52px;margin-bottom:12px">🔬</div>
+        <h1 style="margin:0;color:#e2e8f0;font-size:28px;font-weight:700;letter-spacing:-0.5px">
+            Research Intelligence Assistant
+        </h1>
+        <p style="margin:10px 0 0;color:#94a3b8;font-size:14px;max-width:480px;margin-left:auto;margin-right:auto">
+            Multi-agent AI research platform with 13 specialized tools,
+            PDF paper analysis, real-time academic search, and intelligent synthesis.
+        </p>
+        <div style="margin-top:16px;display:flex;justify-content:center;gap:8px;flex-wrap:wrap">
+            <span style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.3);
+                         color:#60a5fa;padding:4px 12px;border-radius:20px;font-size:12px">LangGraph</span>
+            <span style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);
+                         color:#34d399;padding:4px 12px;border-radius:20px;font-size:12px">OpenAI / Groq</span>
+            <span style="background:rgba(124,58,237,0.15);border:1px solid rgba(124,58,237,0.3);
+                         color:#a78bfa;padding:4px 12px;border-radius:20px;font-size:12px">ChromaDB RAG</span>
+            <span style="background:rgba(245,158,11,0.15);border:1px solid rgba(245,158,11,0.3);
+                         color:#fbbf24;padding:4px 12px;border-radius:20px;font-size:12px">13 Research Tools</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col = st.columns([1, 2, 1])[1]
+    with col:
+        tab_login, tab_register = st.tabs(["🔐 Login", "📝 Register"])
+
+        with tab_login:
+            st.markdown("#### Welcome back")
+            email    = st.text_input("Email",    key="login_email",    placeholder="you@example.com")
+            password = st.text_input("Password", key="login_password", type="password")
+            if st.button("Login", use_container_width=True, type="primary"):
+                if not email or not password:
+                    st.error("Please fill in both fields.")
+                else:
+                    ok, result = login_user(email, password)
+                    if ok:
+                        st.session_state.logged_in_user = result
+                        st.rerun()
+                    else:
+                        st.error(result.get("error", "Login failed."))
+
+        with tab_register:
+            st.markdown("#### Create an account")
+            reg_email    = st.text_input("Email",            key="reg_email",    placeholder="you@example.com")
+            reg_password = st.text_input("Password",         key="reg_password", type="password", help="At least 6 characters")
+            reg_confirm  = st.text_input("Confirm password", key="reg_confirm",  type="password")
+            if st.button("Register", use_container_width=True, type="primary"):
+                if not reg_email or not reg_password or not reg_confirm:
+                    st.error("Please fill in all fields.")
+                elif reg_password != reg_confirm:
+                    st.error("Passwords do not match.")
+                else:
+                    ok, err = register_user(reg_email, reg_password)
+                    if ok:
+                        st.success("Account created! You can now log in.")
+                    else:
+                        st.error(err)
+
+
+# ---------------------------------------------------------------------------
+# Main application
+# ---------------------------------------------------------------------------
 
 def main():
-    """Main Streamlit application"""
+    # Auth gate
+    if "logged_in_user" not in st.session_state:
+        _show_auth_page()
+        st.stop()
 
-    # --- Resolve active API key ---
-    # Priority: key entered in the sidebar > key from .env / HuggingFace Secrets
-    user_key = st.session_state.get("user_groq_key", "").strip()
-    env_key  = os.getenv("GROQ_API_KEY", "").strip()
-    active_key = user_key or env_key
-    # Write the resolved key back to the environment so ChatGroq picks it up
-    if active_key:
-        os.environ["GROQ_API_KEY"] = active_key
-    
-    # Title and description
-    st.title("🤖 Multi-Tool Research Bot")
-    st.markdown("""
-    **An intelligent AI assistant with multiple research tools**
+    user = st.session_state.logged_in_user
 
-    This bot can help you with:
-    - 📚 Academic research (ArXiv, PubMed, Semantic Scholar, OpenAlex)
-    - 🏥 Medical & biomedical research (PubMed)
-    - 🌐 Web search and current information
-    - 📖 Wikipedia knowledge base
-    - 🧮 Mathematical calculations
-    - 💻 Code analysis and generation
-    - 🌤️ Weather information
-    - 📄 File content generation
-    """)
-    
-    # Sidebar
+    # ── Resolve API keys ───────────────────────────────────────────────────
+    # Priority: user-entered key > .env / Streamlit secrets
+    user_openai_key = st.session_state.get("user_openai_key", "").strip()
+    env_openai_key  = os.getenv("OPENAI_API_KEY", "").strip()
+    active_openai   = user_openai_key or env_openai_key
+
+    user_groq_key   = st.session_state.get("user_groq_key", "").strip()
+    env_groq_key    = os.getenv("GROQ_API_KEY", "").strip()
+    active_groq     = user_groq_key or env_groq_key
+
+    # Write resolved keys back so langchain-openai / langchain-groq pick them up
+    if active_openai:
+        os.environ["OPENAI_API_KEY"] = active_openai
+    if active_groq:
+        os.environ["GROQ_API_KEY"] = active_groq
+
+    active_key = active_openai or active_groq
+
+    # ── Sidebar ────────────────────────────────────────────────────────────
     with st.sidebar:
-        # --- API key input ---
-        st.header("🔑 Groq API Key")
-        with st.expander("Use your own key", expanded=not active_key):
+
+        # ── Account section ───────────────────────────────────────────────
+        st.markdown("### 👤 Account")
+        today_count = get_chat_count_today(user["id"])
+        if user["is_admin"]:
             st.markdown(
-                "Get a **free** key at [console.groq.com](https://console.groq.com/). "
-                "Your key is only stored in your browser session — never saved anywhere."
+                f"<div style='background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);"
+                f"border-radius:8px;padding:10px 12px;font-size:13px'>"
+                f"<b style='color:#34d399'>⚡ Admin</b><br>"
+                f"<span style='color:#94a3b8'>{user['email']}</span><br>"
+                f"<span style='color:#64748b;font-size:11px'>Unlimited chats</span>"
+                f"</div>",
+                unsafe_allow_html=True,
             )
-            entered_key = st.text_input(
-                "Paste key here",
+        else:
+            remaining = max(0, DAILY_LIMIT - today_count)
+            bar_pct   = int(today_count / DAILY_LIMIT * 100)
+            bar_color = "#22c55e" if remaining > 5 else ("#f59e0b" if remaining > 0 else "#ef4444")
+            st.markdown(
+                f"<div style='background:rgba(30,41,59,0.5);border:1px solid #1e293b;"
+                f"border-radius:8px;padding:10px 12px;font-size:13px'>"
+                f"<b style='color:#e2e8f0'>{user['email']}</b><br>"
+                f"<div style='margin:6px 0 3px;background:#1e293b;border-radius:4px;height:4px'>"
+                f"<div style='width:{bar_pct}%;background:{bar_color};height:4px;border-radius:4px;transition:width 0.3s'></div>"
+                f"</div>"
+                f"<span style='color:#64748b;font-size:11px'>{today_count}/{DAILY_LIMIT} chats today · {remaining} remaining</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        if st.button("🚪 Logout", use_container_width=True):
+            for k in ("logged_in_user", "chatbot_initialized", "chatbot", "messages", "thread_id"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+        st.markdown("---")
+
+        # ── AI Provider section ───────────────────────────────────────────
+        st.markdown("### 📡 AI Provider")
+
+        # Show which provider is active
+        if active_openai:
+            provider_label = "GPT-4o (OpenAI)"
+            provider_color = "#34d399"
+            provider_bg    = "rgba(16,185,129,0.1)"
+            provider_border = "rgba(16,185,129,0.3)"
+        elif active_groq:
+            provider_label = "Llama 3.3 (Groq)"
+            provider_color = "#fbbf24"
+            provider_bg    = "rgba(245,158,11,0.1)"
+            provider_border = "rgba(245,158,11,0.3)"
+        else:
+            provider_label = "No API key"
+            provider_color = "#ef4444"
+            provider_bg    = "rgba(239,68,68,0.1)"
+            provider_border = "rgba(239,68,68,0.3)"
+
+        st.markdown(
+            f"<div style='background:{provider_bg};border:1px solid {provider_border};"
+            f"border-radius:8px;padding:8px 12px;margin-bottom:8px'>"
+            f"<span style='width:8px;height:8px;border-radius:50%;background:{provider_color};"
+            f"display:inline-block;margin-right:8px'></span>"
+            f"<span style='color:{provider_color};font-size:13px;font-weight:600'>{provider_label}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("🔑 OpenAI API Key", expanded=not active_openai):
+            st.caption("Get a key at [platform.openai.com](https://platform.openai.com/) — GPT-4o, most capable.")
+            new_openai = st.text_input(
+                "OpenAI key",
+                type="password",
+                placeholder="sk-proj-...",
+                value=st.session_state.get("user_openai_key", ""),
+                label_visibility="collapsed",
+                key="openai_key_input",
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Apply", key="apply_openai", use_container_width=True):
+                    if new_openai.strip() != st.session_state.get("user_openai_key", ""):
+                        st.session_state.user_openai_key = new_openai.strip()
+                        st.session_state.pop("chatbot_initialized", None)
+                        st.session_state.pop("chatbot", None)
+                    st.rerun()
+            with c2:
+                if st.button("Remove", key="remove_openai", use_container_width=True):
+                    st.session_state.user_openai_key = ""
+                    st.session_state.pop("chatbot_initialized", None)
+                    st.session_state.pop("chatbot", None)
+                    st.rerun()
+
+        with st.expander("⚡ Groq API Key (fallback)", expanded=not active_groq and not active_openai):
+            st.caption("Free at [console.groq.com](https://console.groq.com/) — used as fallback or primary.")
+            new_groq = st.text_input(
+                "Groq key",
                 type="password",
                 placeholder="gsk_...",
                 value=st.session_state.get("user_groq_key", ""),
                 label_visibility="collapsed",
+                key="groq_key_input",
             )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Apply", use_container_width=True):
-                    new_key = entered_key.strip()
-                    if new_key != st.session_state.get("user_groq_key", ""):
-                        st.session_state.user_groq_key = new_key
-                        # Force chatbot to reinitialize with the new key
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Apply", key="apply_groq", use_container_width=True):
+                    if new_groq.strip() != st.session_state.get("user_groq_key", ""):
+                        st.session_state.user_groq_key = new_groq.strip()
                         st.session_state.pop("chatbot_initialized", None)
                         st.session_state.pop("chatbot", None)
                     st.rerun()
-            with col2:
-                if st.button("Remove", use_container_width=True):
+            with c2:
+                if st.button("Remove", key="remove_groq", use_container_width=True):
                     st.session_state.user_groq_key = ""
                     st.session_state.pop("chatbot_initialized", None)
                     st.session_state.pop("chatbot", None)
                     st.rerun()
 
         st.markdown("---")
-        st.header("🛠️ Available Tools")
-        st.markdown("""
-        **Research Sources:**
-        - **ArXiv**: Physics, Math, CS papers
-        - **PubMed**: Medical/biomedical research
-        - **Semantic Scholar**: Highly-cited papers
-        - **OpenAlex**: Open access works
-        - **Wikipedia**: General knowledge
-        - **Web Search**: Current information
 
-        **Utilities:**
-        - **Calculator**: Math operations
-        - **Code Analyzer**: Code review
-        - **Weather Info**: Location weather
-        - **File Generator**: Sample files
-        """)
-        
-        st.header("⚙️ Settings")
-        if st.button("🗑️ Clear Chat History"):
-            if 'messages' in st.session_state:
-                st.session_state.messages = []
-            st.success("Chat history cleared!")
-            st.rerun()
-        
-        st.header("📝 Example Queries")
-        examples = [
-            "Find the latest ArXiv papers on large language models",
-            "Search PubMed for recent studies on CRISPR gene editing",
-            "Find highly cited papers on transformer architecture using Semantic Scholar",
-            "Calculate compound interest: 5000 at 7% annual rate for 10 years",
-            "Search recent news about AI regulation",
-            "Analyze this Python code: def fib(n): return n if n<=1 else fib(n-1)+fib(n-2)",
-        ]
-        
-        for i, example in enumerate(examples):
-            if st.button(example, key=f"example_{i}", use_container_width=True):
-                # Stage the example as a pending input; the main chat loop
-                # handles it with the same streaming path as regular messages.
-                st.session_state.pending_example = example
-                st.rerun()
-        
-        # Add info about deployment
-        st.markdown("---")
-        st.markdown("### 📊 App Info")
-        if active_key:
-            key_source = "your key" if user_key else "shared key"
-            st.info(f"**Status:** ✅ Running\n\n**Key:** {key_source}")
+        # ── Loaded Papers section ─────────────────────────────────────────
+        st.markdown("### 📄 Loaded Papers")
+        loaded = st.session_state.get("uploaded_pdfs", {})
+        if loaded:
+            for pdf_name, pdf_info in list(loaded.items()):
+                c1, c2 = st.columns([5, 1])
+                with c1:
+                    title = pdf_info.get("title", pdf_name) if isinstance(pdf_info, dict) else pdf_name
+                    st.markdown(f"**{pdf_name}**")
+                    if isinstance(pdf_info, dict):
+                        st.caption(f"{pdf_info.get('pages','?')} pages · {pdf_info.get('chunks','?')} chunks")
+                with c2:
+                    if st.button("✕", key=f"rm_{pdf_name}", help=f"Remove {pdf_name}"):
+                        try:
+                            from src.rag import ResearchVectorStore
+                            ResearchVectorStore().delete_pdf(pdf_name, str(user["id"]))
+                        except Exception:
+                            pass
+                        del st.session_state.uploaded_pdfs[pdf_name]
+                        st.rerun()
         else:
-            st.error("**Status:** ❌ No API key")
-        
-        # GitHub link
+            st.caption("No papers loaded. Use the upload panel above the chat.")
+
         st.markdown("---")
-        st.markdown("### 🔗 Links")
-        st.markdown("[View on GitHub](https://github.com/Waseekk/multi-tool-research-bot)")
-    
-    # Gate: require a key before the chatbot initializes.
-    # Placed here (after sidebar) so the key input is always visible even with no key.
+
+        # ── Tools section ─────────────────────────────────────────────────
+        with st.expander("🛠️ Research Tools (13)", expanded=False):
+            st.markdown("""
+**Academic Search**
+- ArXiv · PubMed · Semantic Scholar
+- OpenAlex · Find Related Papers
+
+**Web & General**
+- DuckDuckGo · Tavily · Wikipedia
+
+**Analysis & Utilities**
+- Calculator · Code Analyzer
+- Weather · File Generator
+- PDF Search (uploaded papers)
+""")
+
+        st.markdown("---")
+
+        # ── Settings ──────────────────────────────────────────────────────
+        st.markdown("### ⚙️ Settings")
+        if st.button("🗑️ Clear Chat History", use_container_width=True):
+            st.session_state.messages = []
+            st.success("Chat cleared.")
+            st.rerun()
+
+        # ── Example Queries ───────────────────────────────────────────────
+        with st.expander("💡 Example Queries", expanded=False):
+            examples = [
+                "Find the latest papers on large language models",
+                "Search PubMed: recent CRISPR gene editing studies",
+                "Find highly-cited transformer architecture papers",
+                "Calculate compound interest: $5000 at 7% for 10 years",
+                "Explain attention mechanism with code and diagrams",
+                "What are the current debates in quantum computing research?",
+            ]
+            for i, ex in enumerate(examples):
+                if st.button(ex, key=f"ex_{i}", use_container_width=True):
+                    st.session_state.pending_example = ex
+                    st.rerun()
+
+        st.markdown("---")
+
+        # ── About / Portfolio ─────────────────────────────────────────────
+        st.markdown("### 🔗 About")
+        st.markdown("""
+<div style="font-size:12px;color:#64748b;line-height:1.7">
+  <b style="color:#94a3b8">Stack:</b> Streamlit · LangGraph · LangChain<br>
+  <b style="color:#94a3b8">LLMs:</b> OpenAI GPT-4o · Groq Llama 3.3<br>
+  <b style="color:#94a3b8">RAG:</b> ChromaDB · sentence-transformers<br>
+  <b style="color:#94a3b8">Auth:</b> SQLite · bcrypt<br>
+  <b style="color:#94a3b8">Search:</b> arXiv · PubMed · Semantic Scholar
+</div>
+""", unsafe_allow_html=True)
+        st.markdown("[GitHub](https://github.com/Waseekk/multi-tool-research-bot) · [Report Issue](https://github.com/Waseekk/multi-tool-research-bot/issues)")
+
+    # ── Hero header ────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 55%,#0f172a 100%);
+            border:1px solid rgba(59,130,246,0.2);border-radius:14px;
+            padding:20px 26px;margin-bottom:18px">
+  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+    <span style="font-size:36px">🔬</span>
+    <div style="flex:1;min-width:200px">
+      <h1 style="margin:0;color:#e2e8f0;font-size:22px;font-weight:700;letter-spacing:-0.3px">
+        Research Intelligence Assistant
+      </h1>
+      <p style="margin:4px 0 0;color:#94a3b8;font-size:12.5px">
+        Multi-agent AI &nbsp;·&nbsp; 13 research tools &nbsp;·&nbsp; PDF analysis &nbsp;·&nbsp; Real-time synthesis
+      </p>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <span style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.3);
+                   color:#60a5fa;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500">LangGraph</span>
+      <span style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);
+                   color:#34d399;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500">GPT-4o</span>
+      <span style="background:rgba(124,58,237,0.15);border:1px solid rgba(124,58,237,0.3);
+                   color:#a78bfa;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500">ChromaDB</span>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── Gate: require at least one API key ─────────────────────────────────
     if not active_key:
-        st.warning("⚠️ No Groq API key found. Enter your key in the sidebar to get started.")
-        st.info("Get a **free** key in 30 seconds at [console.groq.com](https://console.groq.com/) — no credit card needed.")
+        st.warning("⚠️ No API key found. Enter your key in the sidebar to start.")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.info("**OpenAI** (Recommended)  \nGet GPT-4o at [platform.openai.com](https://platform.openai.com/)")
+        with c2:
+            st.info("**Groq** (Free tier)  \nGet a key at [console.groq.com](https://console.groq.com/)")
         st.stop()
 
-    # Each browser session gets a unique thread_id. MemorySaver uses this as the
-    # key to isolate conversation history — without it all users would share one
-    # memory and see each other's messages.
+    # ── Session init ────────────────────────────────────────────────────────
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = str(uuid.uuid4())
-
-    # Initialize chat history
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    
-    # Display chat messages
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-    
-    # Chat input — also picks up example button clicks staged via pending_example
-    user_input = st.chat_input("Ask me anything! I have access to multiple research tools.")
+
+    # ── PDF upload panel ────────────────────────────────────────────────────
+    with st.expander(
+        "📄 Upload Research Papers",
+        expanded=not bool(st.session_state.get("uploaded_pdfs")),
+    ):
+        if not st.session_state.get("_rag_warned"):
+            st.info("First upload downloads the embedding model (~420 MB, one-time). Subsequent uploads are fast.")
+            st.session_state._rag_warned = True
+        files = st.file_uploader(
+            "Drop PDF files here or click to browse",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="main_pdf_uploader",
+        )
+        if files:
+            if "uploaded_pdfs" not in st.session_state:
+                st.session_state.uploaded_pdfs = {}
+            for f in files:
+                if f.name not in st.session_state.uploaded_pdfs:
+                    with st.spinner(f"Indexing {f.name}..."):
+                        try:
+                            from src.rag import PDFProcessor, ResearchVectorStore
+                            pdf_data = PDFProcessor().process_pdf(f.read(), f.name)
+                            n_chunks = ResearchVectorStore().add_pdf(pdf_data, str(user["id"]))
+                            st.session_state.uploaded_pdfs[f.name] = {
+                                "pages":  pdf_data["metadata"]["pages"],
+                                "chunks": n_chunks,
+                                "title":  pdf_data["metadata"]["title"],
+                            }
+                            st.success(
+                                f"✅ **{f.name}** — "
+                                f"{pdf_data['metadata']['pages']} pages · {n_chunks} chunks indexed"
+                            )
+                        except Exception as e:
+                            st.error(f"Failed to process {f.name}: {e}")
+        if st.session_state.get("uploaded_pdfs"):
+            st.markdown(
+                "**Loaded:** " + " &nbsp;·&nbsp; ".join(
+                    f"📄 {n}" for n in st.session_state.uploaded_pdfs
+                )
+            )
+
+    # ── Chat history ────────────────────────────────────────────────────────
+    for idx, msg in enumerate(st.session_state.messages):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"] == "assistant":
+                tools_used = msg.get("tools_used", [])
+                if tools_used:
+                    st.markdown(render_tool_badges(tools_used), unsafe_allow_html=True)
+                render_copy_btn(msg["content"], f"hist_{idx}")
+
+    # ── Chat input ──────────────────────────────────────────────────────────
+    user_input = st.chat_input("Ask anything — academic papers, PDFs, calculations, code, and more…")
     if "pending_example" in st.session_state:
         user_input = st.session_state.pop("pending_example")
 
     def _is_inappropriate(text: str) -> bool:
-        blocked = ["fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy", "cunt", "nigger", "faggot"]
+        blocked = ["fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy", "cunt"]
         t = text.lower()
         return any(w in t for w in blocked)
 
     if user_input:
         if _is_inappropriate(user_input):
             with st.chat_message("assistant"):
-                st.warning("This assistant is designed for research and professional use. Please keep queries respectful.")
+                st.warning("This assistant is designed for research. Please keep queries respectful.")
             st.stop()
+
+        if is_daily_limit_reached(user["id"], user["is_admin"]):
+            st.warning(
+                f"You've reached today's limit of {DAILY_LIMIT} chats. "
+                "Come back tomorrow — your limit resets at midnight."
+            )
+            st.stop()
+
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
@@ -390,18 +715,33 @@ def main():
         with st.chat_message("assistant"):
             try:
                 chatbot = StreamlitChatbot()
+                # Set context vars before graph.stream() — tools read these instead of
+                # st.session_state (which is not reliably accessible in LangGraph threads)
+                _active_user_id.set(str(user["id"]))
+                _active_pdf_names.set(list(st.session_state.get("uploaded_pdfs", {}).keys()))
+
                 response = st.write_stream(
                     chatbot.stream_response(user_input, thread_id=st.session_state.thread_id)
                 )
-                st.session_state.messages.append({"role": "assistant", "content": response})
-            except Exception as e:
-                error_msg = f"Sorry, I encountered an error: {str(e)}"
-                st.error(error_msg)
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                increment_chat_count(user["id"])
 
-    # Footer
-    st.markdown("---")
-    st.markdown("Built with ❤️ using Streamlit, LangChain, and LangGraph | [Report Issues](https://github.com/Waseekk/multi-tool-research-bot/issues)")
+                used_tools = st.session_state.get("_last_tools_used", [])
+                if used_tools:
+                    st.markdown(render_tool_badges(used_tools), unsafe_allow_html=True)
+
+                # Small copy icon — replaces the old "📋 Copy response" expander
+                render_copy_btn(response, f"new_{len(st.session_state.messages)}")
+
+                st.session_state.messages.append({
+                    "role":       "assistant",
+                    "content":    response,
+                    "tools_used": used_tools,
+                })
+            except Exception as e:
+                err = f"Sorry, I encountered an error: {e}"
+                st.error(err)
+                st.session_state.messages.append({"role": "assistant", "content": err})
+
 
 if __name__ == "__main__":
     main()

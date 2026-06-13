@@ -15,6 +15,7 @@ from typing import List
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, ToolMessage, BaseMessage
 from langgraph.prebuilt import ToolNode, tools_condition
 from .models import ConversationState, EnhancedLLM
+from .tools import _active_pdf_names
 
 
 def create_enhanced_nodes(tools: List, llm_manager: EnhancedLLM):
@@ -22,16 +23,7 @@ def create_enhanced_nodes(tools: List, llm_manager: EnhancedLLM):
     Returns (context_aware_llm, enhanced_tool_node) as a tuple of callables.
 
     Both functions are closures that share the same `tools` list and `llm_manager`
-    instance, so they don't need to receive them through graph state on every call.
-
-    Parameters
-    ----------
-    tools       : list of LangChain tool objects (built by initialize_tools in tools.py)
-    llm_manager : EnhancedLLM instance (shared across all graph calls for the session)
-
-    Returns
-    -------
-    (context_aware_llm, enhanced_tool_node) — pass directly to StateGraph.add_node()
+    instance so they don't need to receive them through graph state on every call.
     """
 
     def context_aware_llm(state: ConversationState) -> ConversationState:
@@ -41,23 +33,16 @@ def create_enhanced_nodes(tools: List, llm_manager: EnhancedLLM):
         Steps:
           1. Detect task type from the last human message (keyword matching)
           2. Get the right model+temperature for that task
-          3. Rebuild the system message with current conversation_summary + last_tool_used
+          3. Rebuild the system message with current pdf context + conversation summary
           4. Invoke the LLM with all tools bound
           5. Return the response (may contain tool call requests — LangGraph routes accordingly)
 
-        On failure:
-          - Cascades through all 5 models in order, skipping the one that just failed
-          - Handles 429 rate limits (daily token exhaustion) by automatically switching models
-          - Returns a user-friendly message only when every model is exhausted
-
-        State keys written: messages, error_count, current_model_used
+        On failure: cascades through the full model fallback chain, then surfaces a
+        user-friendly message only when every model is exhausted.
         """
-        # Initialize messages before try so it's always accessible in except
         messages = state.get("messages", [])
         try:
-
-            # Scan backwards for the last HumanMessage. Tool messages and AI messages
-            # may have been added between the human turn and this node invocation.
+            # Scan backwards for the last HumanMessage to detect task type
             last_human_msg = None
             for msg in reversed(messages):
                 if isinstance(msg, HumanMessage):
@@ -70,68 +55,123 @@ def create_enhanced_nodes(tools: List, llm_manager: EnhancedLLM):
                 else llm_manager.get_llm()
             )
 
-            # Tools must be re-bound every call because the LLM instance is recreated
-            # each time (task-specific temperature varies between turns).
             llm_with_tools = llm.bind_tools(tools)
 
-            # System message is rebuilt every turn so conversation_summary and
-            # last_tool_used always reflect current state. If we only built it once
-            # (on the first turn) those fields would be frozen as empty strings forever.
-            # To add new context variables to the prompt, add them to ConversationState
-            # (models.py) and reference them here with state.get().
-            system_prompt = f"""You are an advanced AI research assistant with access to multiple tools.
+            # Build uploaded-papers context — injected into system prompt each turn
+            # so the agent always knows what PDF files are available for pdf_search
+            pdf_names = _active_pdf_names.get()
+            if pdf_names:
+                pdf_ctx = (
+                    "UPLOADED PAPERS (call pdf_search to search these — do not skip this step):\n"
+                    + "\n".join(f"  • {n}" for n in pdf_names)
+                )
+            else:
+                pdf_ctx = "No papers currently uploaded."
 
-Conversation so far: {state.get('conversation_summary', 'New conversation')}
-Last tool used: {state.get('last_tool_used', 'None')}
+            # The system prompt is the primary lever for response quality.
+            # It is rebuilt every turn so pdf_ctx / conversation_summary always reflect
+            # the current state rather than the values from the very first turn.
+            system_prompt = f"""You are an elite AI research intelligence assistant — an expert academic researcher, \
+data scientist, and knowledge synthesizer.
 
-Available tools and when to use them:
-- arxiv: Academic papers on physics, math, computer science, engineering
-- pub_med: Medical, biomedical, life sciences, and healthcare research
-- semantic_scholar_search: Highly-cited papers across all fields with citation counts
-- openalex_search: Open access scholarly works across all disciplines
-- wikipedia: General knowledge, definitions, background information
-- duckduckgo_search (or tavily_search_results_json): Current news, recent events, real-time web info
-- calculator: All math — always call this for any numerical computation, never compute in your head
-- code_analyzer: Code review and syntax checking
-- weather_info: Weather by city name
-- file_content_generator: Generate CSV, JSON, Python, or Markdown file content
+ACTIVE CONTEXT:
+• Conversation history: {state.get('conversation_summary', 'New conversation')}
+• Last tool used: {state.get('last_tool_used', 'None')}
+• {pdf_ctx}
 
-Rules:
-1. Use tools proactively — prefer live tool results over your training knowledge for facts and research
-2. For research questions: start with arxiv or pub_med, fall back to semantic_scholar_search
-3. For any calculation: always use calculator
-4. For current events or news: use duckduckgo_search
-5. Cite sources (titles, authors, URLs) when using research tools
-6. If one tool fails or returns no results, try an alternative (e.g. arxiv -> semantic_scholar_search)
-7. Be thorough but concise — summarize key findings rather than dumping raw tool output"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TOOL SELECTION — follow this priority order exactly
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. PDF QUERIES — user mentions "my paper", "the document", "uploaded", "this study", \
+or papers are listed above → call pdf_search FIRST, then find_related_papers to connect \
+it to the broader field. Cite as [Paper: title, Page: N].
+
+2. ACADEMIC RESEARCH — use multiple sources for comprehensive coverage:
+   • arxiv → CS, math, physics, engineering (preprints + published)
+   • pub_med → medical, biomedical, neuroscience, clinical trials
+   • semantic_scholar_search → citation counts, highly-cited works across all fields
+   • find_related_papers → simultaneous arXiv + Semantic Scholar search in one call
+   Use at least 2 sources for any research topic; cross-reference findings.
+
+3. CALCULATIONS → ALWAYS call calculator. Never compute in your head. Show the formula first.
+
+4. CODE QUESTIONS → use code_analyzer for debugging/review. Include Python code blocks in answers.
+
+5. CURRENT EVENTS / NEWS → duckduckgo_search or tavily_search_results_json.
+
+6. GENERAL KNOWLEDGE → wikipedia for background, then web search for recent developments.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESPONSE QUALITY STANDARDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEPTH OF ANALYSIS:
+• Synthesize findings — do not just summarize tool output
+• Explain WHY researchers chose specific approaches (methodology rationale)
+• Connect findings to the research landscape: what came before, what this builds on
+• Identify consensus vs. active debates in the field
+• Point out methodological strengths and limitations
+• Suggest future research directions and open problems
+
+STRUCTURE — use these sections where relevant:
+• **Key Findings** — the core answer, synthesized clearly
+• **Methodology & Rationale** — how the research was done and why this approach
+• **Research Context** — prior work this builds on; historical evolution
+• **Debate & Open Questions** — what is still contested or unknown
+• **Future Directions** — emerging areas and next research steps
+
+CODE & DIAGRAMS — include whenever explaining technical concepts:
+• Algorithms: always provide a Python code example
+• System architecture: use Mermaid flowcharts inside ```mermaid blocks
+• Data flows: ASCII diagrams are acceptable when Mermaid is not natural
+• Mathematical notation: use LaTeX-style inline ($formula$) or block ($$formula$$)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CITATIONS & REFERENCES (MANDATORY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every factual claim must be cited in-text:
+• Uploaded PDFs → [Paper: filename, Page: N]
+• External papers → (Author et al., Year)
+• Web sources → [Source: title or domain]
+
+EVERY response that makes factual claims or uses any tool MUST end with a References section:
+
+## References
+1. Author(s). "Title." Venue, Year. DOI or URL if available.
+2. ...
+
+If the answer is from general knowledge with no tools used:
+## References
+*Based on general knowledge. For verified details, consider checking primary sources.*"""
 
             # Replace any existing SystemMessage rather than appending a duplicate.
-            # MemorySaver persists all messages across turns, so without this replacement
-            # the original system message from turn 1 would remain at position 0 forever
-            # with stale (empty) context values.
+            # MemorySaver persists all messages across turns, so without this the
+            # original system message from turn 1 stays frozen with stale context values.
             non_system = [m for m in messages if not isinstance(m, SystemMessage)]
-            messages = [SystemMessage(content=system_prompt)] + non_system
+            messages   = [SystemMessage(content=system_prompt)] + non_system
 
-            response = llm_with_tools.invoke(messages)
+            response      = llm_with_tools.invoke(messages)
             current_model = llm_manager.get_current_model_name()
-            print(f"Using model: {current_model}")
+            print(f"[nodes] Response from {llm_manager.get_provider()}/{current_model}")
 
             return {
-                "messages": [response],
-                "error_count": 0,             # reset on any successful call
+                "messages":           [response],
+                "error_count":        0,
                 "current_model_used": current_model,
             }
 
         except Exception as e:
-            print(f"LLM error: {str(e)}")
+            print(f"[nodes] LLM error: {e}")
             error_count = state.get("error_count", 0) + 1
-            last_error = str(e)
+            last_error  = str(e)
 
-            # Cascade through every model in the fallback chain. This handles 429
-            # rate limits (daily token exhaustion) where the primary is dead for hours
-            # — we skip it and try the next model automatically.
+            # Cascade through every fallback model. Handles 429 rate limits (daily
+            # token exhaustion) where the primary is dead for hours — we skip it and
+            # try the next model automatically.
             failed_model = llm_manager.get_current_model_name()
-            all_configs = (
+            all_configs  = (
                 [llm_manager.primary_config, llm_manager.secondary_config]
                 + llm_manager.fallback_configs
             )
@@ -145,18 +185,17 @@ Rules:
                         continue
                     response = fallback_llm.bind_tools(tools).invoke(messages)
                     llm_manager.current_config = config
-                    print(f"Switched to fallback model: {config.name}")
+                    print(f"[nodes] Switched to fallback: {config.provider}/{config.name}")
                     return {
-                        "messages": [response],
-                        "error_count": 0,
+                        "messages":           [response],
+                        "error_count":        0,
                         "current_model_used": config.name,
                     }
                 except Exception as fe:
                     last_error = str(fe)
-                    print(f"Fallback {config.name} also failed: {last_error}")
+                    print(f"[nodes] Fallback {config.name} also failed: {fe}")
                     continue
 
-            # Every model failed — surface a clear message
             is_rate_limit = "429" in last_error or "rate limit" in last_error.lower()
             user_msg = (
                 "All models are currently rate-limited. Please wait a few minutes and try again."
@@ -164,7 +203,7 @@ Rules:
                 else f"All models failed. Last error: {last_error}"
             )
             return {
-                "messages": [AIMessage(content=user_msg)],
+                "messages":   [AIMessage(content=user_msg)],
                 "error_count": error_count,
             }
 
@@ -173,42 +212,27 @@ Rules:
         Tool execution node. Dispatches the tool calls requested by the LLM
         and returns their results as ToolMessages.
 
-        LangGraph's built-in ToolNode handles the actual dispatch and result formatting.
-        This wrapper adds:
-          - last_tool_used tracking (written to state, surfaced in next system prompt)
-          - error_count increment on failure
-          - a user-friendly error message if the tool crashes
-
-        State keys written: messages, last_tool_used, error_count
-
-        To add a new tool: define it in tools.py, add it to initialize_tools(), and
-        add its name + description to the system prompt in context_aware_llm above.
-        No changes needed here.
+        Adds last_tool_used tracking (surfaced in next system prompt) and wraps
+        crashes in a user-friendly ToolMessage so the LLM can recover gracefully.
         """
         try:
             result = ToolNode(tools).invoke(state)
 
             messages = result.get("messages", [])
             if messages:
-                # Track last tool for the system prompt context on the next turn
                 tool_name = getattr(messages[-1], "name", "unknown_tool")
                 result.update({
-                    "messages": messages,
+                    "messages":      messages,
                     "last_tool_used": tool_name,
-                    "error_count": 0,
+                    "error_count":   0,
                 })
 
             return result
 
         except Exception as e:
-            print(f"Tool execution error: {str(e)}")
-            # Find the last AI message's tool_calls so we can return a ToolMessage
-            # for each pending call. Returning an AIMessage here instead would break
-            # the message sequence (AIMessage with tool_calls must be followed by
-            # ToolMessages) and would never be streamed (streaming only captures from
-            # context_llm, not enhanced_tools).
-            messages = state.get("messages", [])
-            last_ai_msg = None
+            print(f"[nodes] Tool execution error: {e}")
+            messages     = state.get("messages", [])
+            last_ai_msg  = None
             for msg in reversed(messages):
                 if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
                     last_ai_msg = msg
@@ -218,7 +242,7 @@ Rules:
                 return {
                     "messages": [
                         ToolMessage(
-                            content=f"Tool error: {str(e)}. Try a different approach.",
+                            content=f"Tool error: {e}. Try a different approach or tool.",
                             tool_call_id=tc["id"],
                             name=tc["name"],
                         )
@@ -227,7 +251,7 @@ Rules:
                     "error_count": state.get("error_count", 0) + 1,
                 }
             return {
-                "messages": [AIMessage(content=f"Error using tools: {str(e)}")],
+                "messages":   [AIMessage(content=f"Error using tools: {e}")],
                 "error_count": state.get("error_count", 0) + 1,
             }
 
@@ -237,37 +261,22 @@ Rules:
 def get_task_optimized_llm(llm_manager: EnhancedLLM, user_message: str):
     """
     Keyword-based task classifier. Maps the user's message to one of the task
-    types defined in TASK_TEMPERATURES (models.py) so the right model and
-    temperature are applied.
-
-    To add a new task type:
-      1. Add the type + temperature to TASK_TEMPERATURES in models.py
-      2. Add it to task_model_mapping in EnhancedLLM.get_model_for_task() in models.py
-      3. Add keyword detection here
+    types in TASK_TEMPERATURES (models.py) and returns the appropriately configured LLM.
 
     Simple keyword matching is intentional — an LLM-based classifier would add a
-    full inference round-trip just to route the request, which is not worth it.
-
-    Parameters
-    ----------
-    llm_manager  : EnhancedLLM instance
-    user_message : the raw user input string
-
-    Returns
-    -------
-    ChatGroq instance configured for the detected task type
+    full inference round-trip just to route the request, which is not worth the cost.
     """
     msg = user_message.lower()
 
-    if any(w in msg for w in ["calculate", "math", "equation", "solve", "compute", "%", "percent"]):
+    if any(w in msg for w in ["calculate", "math", "equation", "solve", "compute", "integral", "derivative", "%", "percent"]):
         return llm_manager.get_model_for_task("math")
-    elif any(w in msg for w in ["research", "paper", "study", "academic", "arxiv", "latest research"]):
+    elif any(w in msg for w in ["research", "paper", "study", "academic", "arxiv", "pubmed", "literature", "latest research", "find papers"]):
         return llm_manager.get_model_for_task("reasoning")
-    elif any(w in msg for w in ["analyze", "analysis", "compare", "evaluate"]):
+    elif any(w in msg for w in ["analyze", "analysis", "compare", "evaluate", "review", "assess", "critique"]):
         return llm_manager.get_model_for_task("analysis")
-    elif any(w in msg for w in ["code", "programming", "python", "javascript", "debug"]):
+    elif any(w in msg for w in ["code", "programming", "python", "javascript", "function", "debug", "implement", "algorithm"]):
         return llm_manager.get_model_for_task("coding")
-    elif any(w in msg for w in ["write", "story", "poem", "creative", "imagine"]):
+    elif any(w in msg for w in ["write", "story", "poem", "creative", "imagine", "generate text", "essay"]):
         return llm_manager.get_model_for_task("creative")
     else:
         return llm_manager.get_model_for_task("general")
