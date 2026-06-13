@@ -265,9 +265,15 @@ class StreamlitChatbot:
         """
         Yields string chunks for st.write_stream (token-by-token streaming).
 
-        - ToolMessage  → yields a brief italic progress line so the UI isn't blank
-        - AIMessageChunk with text content → yields the token
+        - ToolMessage      → yields a brief italic progress line so the UI isn't blank
+        - AIMessageChunk   → extracts text and yields it
         - Complete AIMessage → error handler response, yielded whole
+
+        Provider differences handled here:
+          - Groq / OpenAI: chunk.content is a plain string
+          - Anthropic:     chunk.content is a list of blocks, e.g.
+                           [{'type': 'text', 'text': 'Hello', 'index': 0}]
+                           We extract only the 'text' blocks and join them.
         """
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
         st.session_state._last_tools_used = []
@@ -280,15 +286,34 @@ class StreamlitChatbot:
                     if name not in st.session_state._last_tools_used:
                         st.session_state._last_tools_used.append(name)
                     yield f"\n*Searching with **{name}**...*\n\n"
-                elif (
-                    isinstance(chunk, AIMessageChunk)
-                    and chunk.content
-                    and not getattr(chunk, "tool_call_chunks", None)
-                ):
-                    yield chunk.content
+
+                elif isinstance(chunk, AIMessageChunk):
+                    content = chunk.content
+                    if isinstance(content, list):
+                        # Anthropic format: list of typed blocks — extract text blocks only
+                        text = "".join(
+                            block.get("text", "")
+                            for block in content
+                            if isinstance(block, dict) and block.get("type") == "text"
+                        )
+                    else:
+                        # OpenAI / Groq format: plain string
+                        text = content or ""
+                    if text:
+                        yield text
+
                 elif isinstance(chunk, AIMessage) and chunk.content:
                     # All-models-failed error handler returns a complete AIMessage
-                    yield chunk.content
+                    content = chunk.content
+                    if isinstance(content, list):
+                        text = "".join(
+                            block.get("text", "")
+                            for block in content
+                            if isinstance(block, dict) and block.get("type") == "text"
+                        )
+                        yield text or str(content)
+                    else:
+                        yield content
         except Exception as e:
             yield f"\n\nError: {e}"
 
