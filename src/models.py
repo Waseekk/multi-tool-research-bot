@@ -39,6 +39,10 @@ class ConversationState(TypedDict):
     `messages` uses the add_messages reducer so new messages are appended rather
     than replacing the list — this is what accumulates multi-turn history in
     MemorySaver. All other fields use simple last-write-wins assignment.
+
+    Multi-agent fields:
+      current_agent - set by supervisor_node; drives conditional routing
+      active_pdfs   - PDF names loaded for this user; set by supervisor from ContextVar
     """
     messages: Annotated[List[AnyMessage], add_messages]
     user_context: Dict[str, Any]
@@ -48,6 +52,8 @@ class ConversationState(TypedDict):
     last_tool_used: str
     current_model_used: str
     model_switch_count: int
+    current_agent: str       # "research" | "pdf"
+    active_pdfs: List[str]   # PDF names available for this user session
 
 
 # ---------------------------------------------------------------------------
