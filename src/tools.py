@@ -387,7 +387,8 @@ def pdf_search(query: str) -> str:
             return "Error: No active user session. Please refresh and log in again."
 
         store = ResearchVectorStore()
-        results = store.search(query, user_id=user_id, k=6)
+        # k=4 chunks × max 600 chars each ≈ ~600 tokens total — keeps fallback Groq models safe
+        results = store.search(query, user_id=user_id, k=4)
 
         if not results:
             return (
@@ -398,10 +399,12 @@ def pdf_search(query: str) -> str:
         parts = []
         for r in results:
             page_info = f", Page {r['page_num']}" if r["page_num"] > 0 else ""
+            # Truncate each chunk to 600 chars to prevent context explosion on Groq fallbacks
+            text = r["text"][:600] + ("..." if len(r["text"]) > 600 else "")
             parts.append(
                 f"[Paper: {r['paper_title']}{page_info}]\n"
-                f"{r['text']}\n"
-                f"*(Relevance: {r['score']})*"
+                f"{text}\n"
+                f"*(Relevance: {r['score']:.2f})*"
             )
         return f"## From Your Uploaded Papers — '{query}'\n\n" + "\n\n---\n\n".join(parts)
 
@@ -433,7 +436,7 @@ def find_related_papers(topic: str) -> str:
         try:
             resp = requests.get(
                 "http://export.arxiv.org/api/query",
-                params={"search_query": f"all:{q}", "max_results": 5, "sortBy": "relevance"},
+                params={"search_query": f"all:{q}", "max_results": 3, "sortBy": "relevance"},
                 timeout=10,
             )
             import xml.etree.ElementTree as ET
@@ -442,12 +445,12 @@ def find_related_papers(topic: str) -> str:
             entries = root.findall(f"{{{ns}}}entry")
             lines = []
             for e in entries:
-                title = (e.findtext(f"{{{ns}}}title") or "").strip().replace("\n", " ")
-                summary = (e.findtext(f"{{{ns}}}summary") or "")[:200].strip().replace("\n", " ")
+                title   = (e.findtext(f"{{{ns}}}title") or "").strip().replace("\n", " ")
+                summary = (e.findtext(f"{{{ns}}}summary") or "")[:120].strip().replace("\n", " ")
                 link_el = e.find(f"{{{ns}}}link[@rel='alternate']")
-                url = link_el.attrib.get("href", "") if link_el is not None else ""
-                lines.append(f"**[arXiv]** {title}\n  {summary}...\n  {url}")
-            return "\n\n".join(lines)
+                url     = link_el.attrib.get("href", "") if link_el is not None else ""
+                lines.append(f"- **{title}**\n  {summary}... {url}")
+            return "\n".join(lines)
         except Exception as exc:
             return f"arXiv error: {exc}"
 
@@ -457,7 +460,7 @@ def find_related_papers(topic: str) -> str:
                 "https://api.semanticscholar.org/graph/v1/paper/search",
                 params={
                     "query": q,
-                    "limit": 5,
+                    "limit": 3,
                     "fields": "title,abstract,authors,year,citationCount,url",
                 },
                 timeout=10,
@@ -466,13 +469,13 @@ def find_related_papers(topic: str) -> str:
             papers = resp.json().get("data", [])
             lines = []
             for p in papers:
-                authors = ", ".join(a["name"] for a in p.get("authors", [])[:2])
-                abstract = (p.get("abstract") or "")[:200].strip()
+                authors  = ", ".join(a["name"] for a in p.get("authors", [])[:2])
+                abstract = (p.get("abstract") or "")[:120].strip()
                 lines.append(
-                    f"**[S2]** {p.get('title', 'Unknown')} ({p.get('year', '?')}) — {p.get('citationCount', 0)} citations\n"
-                    f"  {authors}\n  {abstract}...\n  {p.get('url', '')}"
+                    f"- **{p.get('title','?')}** ({p.get('year','?')}, {p.get('citationCount',0)} citations)\n"
+                    f"  {authors} — {abstract}... {p.get('url','')}"
                 )
-            return "\n\n".join(lines)
+            return "\n".join(lines)
         except Exception as exc:
             return f"Semantic Scholar error: {exc}"
 
@@ -530,13 +533,14 @@ def initialize_tools() -> List:
         api_wrapper=WikipediaAPIWrapper(top_k_results=2, doc_content_chars_max=800),
         description="Search Wikipedia for general knowledge, definitions, and factual information.",
     )
+    # Reduced from 10 results × 10000 chars — that was ~25k tokens per ArXiv call,
+    # burning Groq's 100k daily limit in 4 queries. 5 results × 3000 chars ≈ 4k tokens.
     arxiv_tool = ArxivQueryRun(
-        api_wrapper=ArxivAPIWrapper(top_k_results=10, doc_content_chars_max=10000),
+        api_wrapper=ArxivAPIWrapper(top_k_results=5, doc_content_chars_max=3000),
         description="Search academic papers on arXiv. Best for recent research papers and preprints.",
     )
-    # PubmedQueryRun requires the `xmltodict` package to parse PubMed XML responses
     pubmed_tool = PubmedQueryRun(
-        api_wrapper=PubMedAPIWrapper(top_k_results=5, doc_content_chars_max=1500),
+        api_wrapper=PubMedAPIWrapper(top_k_results=4, doc_content_chars_max=1200),
         description="Search PubMed for medical, biomedical, life sciences, and healthcare research.",
     )
 

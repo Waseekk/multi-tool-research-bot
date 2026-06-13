@@ -133,23 +133,22 @@ CODE & DIAGRAMS — include whenever explaining technical concepts:
 • Mathematical notation: use LaTeX-style inline ($formula$) or block ($$formula$$)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CITATIONS & REFERENCES (MANDATORY)
+CITATIONS & REFERENCES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Every factual claim must be cited in-text:
+Cite in-text for all factual/research claims:
 • Uploaded PDFs → [Paper: filename, Page: N]
 • External papers → (Author et al., Year)
 • Web sources → [Source: title or domain]
 
-EVERY response that makes factual claims or uses any tool MUST end with a References section:
+When you used a tool OR made factual/research claims, end with:
 
 ## References
-1. Author(s). "Title." Venue, Year. DOI or URL if available.
+1. Author(s). "Title." Venue, Year. URL/DOI if available.
 2. ...
 
-If the answer is from general knowledge with no tools used:
-## References
-*Based on general knowledge. For verified details, consider checking primary sources.*"""
+For pure conversation (greetings, simple questions, acknowledgments, clarifications):
+do NOT add a References section — it is unnecessary and clutters the response."""
 
             # Replace any existing SystemMessage rather than appending a duplicate.
             # MemorySaver persists all messages across turns, so without this the
@@ -188,7 +187,14 @@ If the answer is from general knowledge with no tools used:
                     fallback_llm = llm_manager._create_llm_instance(config)
                     if not fallback_llm:
                         continue
-                    response = fallback_llm.bind_tools(tools).invoke(messages)
+                    # Groq small models (llama-3.1-8b) have a 6000 TPM hard cap.
+                    # When the context is large (tool results + history), trim it to
+                    # just the system message + last 3 messages before retrying —
+                    # this prevents the 413 "request too large" error on fallback calls.
+                    msgs_to_send = messages
+                    if config.provider == "groq" and config.max_tokens <= 2048:
+                        msgs_to_send = messages[:1] + messages[-3:]
+                    response = fallback_llm.bind_tools(tools).invoke(msgs_to_send)
                     llm_manager.current_config = config
                     print(f"[nodes] Switched to fallback: {config.provider}/{config.name}")
                     return {
