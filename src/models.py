@@ -161,10 +161,12 @@ class EnhancedLLM:
         else:
             raise ValueError("No API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY in .env")
 
-        self.current_config  = self.primary_config
-        self.use_secondary   = False
-        self.total_requests  = 0
-        self.cooldown_period = 60    # seconds before a failed model is retried
+        self.current_config   = self.primary_config
+        self.use_secondary    = False
+        self.total_requests   = 0
+        self.cooldown_period  = 60    # seconds before a failed model is retried
+        # When set by the UI model selector, bypasses task-based routing entirely
+        self.user_forced_model: Optional[str] = None
 
     def _is_model_available(self, config: ModelConfig) -> bool:
         """Returns False if the model is within the post-failure cooldown window."""
@@ -280,11 +282,15 @@ class EnhancedLLM:
         """
         Selects model + temperature for the given task type.
 
-        For OpenAI: gpt-4o handles all tasks (temp varies by type).
-        For Groq: complex tasks get secondary (llama-4-scout), simple tasks get primary.
+        If user_forced_model is set (via the sidebar model selector), that model is always
+        used regardless of task type — user choice overrides automatic routing.
 
+        Otherwise routes by task: complex tasks get secondary, simple tasks get primary.
         Falls back to get_llm() if the preferred model is in cooldown.
         """
+        if self.user_forced_model:
+            return self.get_llm(force_model=self.user_forced_model)
+
         task_model_mapping = {
             "reasoning": self.secondary_config,   # research/analysis: deeper model
             "math":      self.primary_config,
