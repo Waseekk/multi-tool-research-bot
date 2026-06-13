@@ -29,8 +29,9 @@ PyMuPDF>=1.24.0
 chromadb>=0.5.0
 sentence-transformers>=3.0.0
 
-# OpenAI provider (GPT-4o primary)
+# LLM providers
 langchain-openai>=0.1.0
+langchain-anthropic>=0.1.0
 
 # Optional: For enhanced features
 requests>=2.31.0

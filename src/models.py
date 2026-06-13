@@ -2,11 +2,14 @@
 src/models.py
 =============
 Defines the shared state schema (ConversationState) and the LLM management layer
-(EnhancedLLM). Supports OpenAI (primary) and Groq (fallback) providers.
+(EnhancedLLM). Supports Anthropic (Claude), OpenAI (GPT-4o), and Groq (Llama) providers.
 
-Provider chain is auto-detected from environment variables:
-  - OPENAI_API_KEY set  → GPT-4o (primary), GPT-4o-mini (secondary), Groq fallbacks if available
-  - Only GROQ_API_KEY   → llama-3.3-70b (primary), llama-4-scout (secondary)
+Provider chain is auto-detected from environment variables (priority order):
+  - ANTHROPIC_API_KEY set → Claude Opus 4.8 (primary), Claude Sonnet 4.6 (secondary)
+  - OPENAI_API_KEY set    → GPT-4o (primary), GPT-4o-mini (secondary)
+  - Only GROQ_API_KEY     → llama-3.3-70b (primary), llama-4-scout (secondary)
+
+Groq models are always added as emergency fallbacks when GROQ_API_KEY is also set.
 
 Graph nodes (nodes.py) import EnhancedLLM and ConversationState.
 app.py imports both to build the LangGraph graph.
@@ -99,13 +102,17 @@ class EnhancedLLM:
     """
     Multi-provider LLM manager with automatic failover and per-task routing.
 
-    Provider chain (auto-built from env vars on __init__):
+    Provider chain (auto-built from env vars on __init__, priority order):
 
-    If OPENAI_API_KEY is set:
-        1. gpt-4o          (openai, primary)   — best reasoning + tool calling
-        2. gpt-4o-mini     (openai, secondary)  — fast, cheap, still very capable
-        3. llama-3.3-70b   (groq fallback)      — only if GROQ_API_KEY also set
-        4. llama-3.1-8b    (groq last resort)
+    If ANTHROPIC_API_KEY is set:
+        1. claude-opus-4-8     (anthropic, primary)   — most capable, best research reasoning
+        2. claude-sonnet-4-6   (anthropic, secondary)  — fast, excellent quality
+        3. llama-3.3-70b       (groq fallback)         — only if GROQ_API_KEY also set
+
+    If only OPENAI_API_KEY is set:
+        1. gpt-4o              (openai, primary)
+        2. gpt-4o-mini         (openai, secondary)
+        3. llama-3.3-70b       (groq fallback)         — only if GROQ_API_KEY also set
 
     If only GROQ_API_KEY:
         1. llama-3.3-70b-versatile                   (groq, primary)
@@ -116,10 +123,24 @@ class EnhancedLLM:
     """
 
     def __init__(self):
-        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-        groq_key   = os.getenv("GROQ_API_KEY",   "").strip()
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        openai_key    = os.getenv("OPENAI_API_KEY",    "").strip()
+        groq_key      = os.getenv("GROQ_API_KEY",      "").strip()
 
-        if openai_key:
+        if anthropic_key:
+            # Anthropic Claude — opus 4.8 is the most capable model for research
+            self.primary_config   = ModelConfig("claude-opus-4-8",         provider="anthropic", temperature=0.1, max_tokens=4096)
+            self.secondary_config = ModelConfig("claude-sonnet-4-6",       provider="anthropic", temperature=0.1, max_tokens=4096)
+            self.fallback_configs = []
+            if openai_key:
+                self.fallback_configs.append(
+                    ModelConfig("gpt-4o-mini", provider="openai", temperature=0.1, max_tokens=4096)
+                )
+            if groq_key:
+                self.fallback_configs.append(
+                    ModelConfig("llama-3.3-70b-versatile", provider="groq", temperature=0.1, max_tokens=4096)
+                )
+        elif openai_key:
             # OpenAI as the primary provider — GPT-4o is best for complex research
             self.primary_config   = ModelConfig("gpt-4o",      provider="openai", temperature=0.1, max_tokens=4096)
             self.secondary_config = ModelConfig("gpt-4o-mini", provider="openai", temperature=0.1, max_tokens=4096)
@@ -138,7 +159,7 @@ class EnhancedLLM:
                 ModelConfig("llama-3.1-8b-instant", provider="groq", temperature=0.1, max_tokens=2048),
             ]
         else:
-            raise ValueError("No API key found. Set OPENAI_API_KEY or GROQ_API_KEY in .env")
+            raise ValueError("No API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GROQ_API_KEY in .env")
 
         self.current_config  = self.primary_config
         self.use_secondary   = False
@@ -162,7 +183,14 @@ class EnhancedLLM:
         try:
             temp = temperature if temperature is not None else config.temperature
 
-            if config.provider == "openai":
+            if config.provider == "anthropic":
+                from langchain_anthropic import ChatAnthropic
+                llm = ChatAnthropic(
+                    model=config.name,
+                    temperature=temp,
+                    max_tokens=config.max_tokens,
+                )
+            elif config.provider == "openai":
                 from langchain_openai import ChatOpenAI
                 llm = ChatOpenAI(
                     model=config.name,

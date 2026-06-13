@@ -31,7 +31,7 @@ load_dotenv()
 # Streamlit Cloud secrets (sets env vars before any module reads them)
 if hasattr(st, "secrets"):
     try:
-        for key in ("GROQ_API_KEY", "OPENAI_API_KEY", "TAVILY_API_KEY"):
+        for key in ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY"):
             if key in st.secrets:
                 os.environ[key] = st.secrets[key]
     except Exception:
@@ -136,7 +136,7 @@ def render_copy_btn(text: str, btn_key: str) -> None:
     Streamlit's iframe sandbox where navigator.clipboard may be restricted.
     Text is base64-encoded to avoid any quoting / escaping issues.
     """
-    b64 = base64.b64encode(text.encode("utf-8")).decode()
+    b64 = base64.b64encode(str(text).encode("utf-8")).decode()
     st.components.v1.html(f"""
     <div style="display:flex;justify-content:flex-end;padding:2px 0 0">
       <button id="cpb_{btn_key}"
@@ -251,7 +251,10 @@ class StreamlitChatbot:
     def chat(self, message: str, thread_id: str = "default") -> str:
         """Non-streaming invoke (sidebar example buttons)."""
         try:
-            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 5}
+            # 12 allows up to 5 tool calls (1 conv_manager + 2×5 tool cycles + 1 final answer)
+            # before the recursion limit triggers. Claude Opus is more thorough than Groq
+            # and may call 2-3 tools per query, so 5 was too tight.
+            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
             result = self.graph.invoke(self._initial_state(message), config)
             ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
             return ai_msgs[-1].content if ai_msgs else "I couldn't generate a response. Please try again."
@@ -266,7 +269,7 @@ class StreamlitChatbot:
         - AIMessageChunk with text content → yields the token
         - Complete AIMessage → error handler response, yielded whole
         """
-        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 5}
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
         st.session_state._last_tools_used = []
         try:
             for chunk, _ in self.graph.stream(
@@ -312,8 +315,8 @@ def _show_auth_page() -> None:
         <div style="margin-top:16px;display:flex;justify-content:center;gap:8px;flex-wrap:wrap">
             <span style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.3);
                          color:#60a5fa;padding:4px 12px;border-radius:20px;font-size:12px">LangGraph</span>
-            <span style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);
-                         color:#34d399;padding:4px 12px;border-radius:20px;font-size:12px">OpenAI / Groq</span>
+            <span style="background:rgba(124,58,237,0.15);border:1px solid rgba(124,58,237,0.3);
+                         color:#a78bfa;padding:4px 12px;border-radius:20px;font-size:12px">Anthropic / OpenAI / Groq</span>
             <span style="background:rgba(124,58,237,0.15);border:1px solid rgba(124,58,237,0.3);
                          color:#a78bfa;padding:4px 12px;border-radius:20px;font-size:12px">ChromaDB RAG</span>
             <span style="background:rgba(245,158,11,0.15);border:1px solid rgba(245,158,11,0.3);
@@ -373,6 +376,10 @@ def main():
 
     # ── Resolve API keys ───────────────────────────────────────────────────
     # Priority: user-entered key > .env / Streamlit secrets
+    user_anthropic_key = st.session_state.get("user_anthropic_key", "").strip()
+    env_anthropic_key  = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    active_anthropic   = user_anthropic_key or env_anthropic_key
+
     user_openai_key = st.session_state.get("user_openai_key", "").strip()
     env_openai_key  = os.getenv("OPENAI_API_KEY", "").strip()
     active_openai   = user_openai_key or env_openai_key
@@ -381,13 +388,16 @@ def main():
     env_groq_key    = os.getenv("GROQ_API_KEY", "").strip()
     active_groq     = user_groq_key or env_groq_key
 
-    # Write resolved keys back so langchain-openai / langchain-groq pick them up
+    # Write resolved keys back so langchain providers pick them up
+    if active_anthropic:
+        os.environ["ANTHROPIC_API_KEY"] = active_anthropic
     if active_openai:
         os.environ["OPENAI_API_KEY"] = active_openai
     if active_groq:
         os.environ["GROQ_API_KEY"] = active_groq
 
-    active_key = active_openai or active_groq
+    # Anthropic takes priority — EnhancedLLM.__init__ reads env vars in this same order
+    active_key = active_anthropic or active_openai or active_groq
 
     # ── Sidebar ────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -422,7 +432,8 @@ def main():
             )
 
         if st.button("🚪 Logout", use_container_width=True):
-            for k in ("logged_in_user", "chatbot_initialized", "chatbot", "messages", "thread_id"):
+            for k in ("logged_in_user", "chatbot_initialized", "chatbot", "messages", "thread_id",
+                      "user_anthropic_key", "user_openai_key", "user_groq_key"):
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -431,21 +442,26 @@ def main():
         # ── AI Provider section ───────────────────────────────────────────
         st.markdown("### 📡 AI Provider")
 
-        # Show which provider is active
-        if active_openai:
-            provider_label = "GPT-4o (OpenAI)"
-            provider_color = "#34d399"
-            provider_bg    = "rgba(16,185,129,0.1)"
+        # Show which provider is currently active
+        if active_anthropic:
+            provider_label  = "Claude Opus 4.8 (Anthropic)"
+            provider_color  = "#a78bfa"
+            provider_bg     = "rgba(124,58,237,0.1)"
+            provider_border = "rgba(124,58,237,0.3)"
+        elif active_openai:
+            provider_label  = "GPT-4o (OpenAI)"
+            provider_color  = "#34d399"
+            provider_bg     = "rgba(16,185,129,0.1)"
             provider_border = "rgba(16,185,129,0.3)"
         elif active_groq:
-            provider_label = "Llama 3.3 (Groq)"
-            provider_color = "#fbbf24"
-            provider_bg    = "rgba(245,158,11,0.1)"
+            provider_label  = "Llama 3.3 (Groq)"
+            provider_color  = "#fbbf24"
+            provider_bg     = "rgba(245,158,11,0.1)"
             provider_border = "rgba(245,158,11,0.3)"
         else:
-            provider_label = "No API key"
-            provider_color = "#ef4444"
-            provider_bg    = "rgba(239,68,68,0.1)"
+            provider_label  = "No API key configured"
+            provider_color  = "#ef4444"
+            provider_bg     = "rgba(239,68,68,0.1)"
             provider_border = "rgba(239,68,68,0.3)"
 
         st.markdown(
@@ -461,13 +477,39 @@ def main():
         # Dropdown to choose which provider key to configure
         key_provider = st.selectbox(
             "Configure API key for:",
-            ["🔑 OpenAI (GPT-4o — Recommended)", "⚡ Groq (Free tier / Fallback)"],
+            [
+                "🤖 Anthropic (Claude Opus — Recommended)",
+                "🔑 OpenAI (GPT-4o)",
+                "⚡ Groq (Free tier / Fallback)",
+            ],
             index=0,
             label_visibility="visible",
             key="key_provider_select",
         )
 
-        if "OpenAI" in key_provider:
+        if "Anthropic" in key_provider:
+            st.caption("Get a key at [console.anthropic.com](https://console.anthropic.com/)")
+            new_anthropic = st.text_input(
+                "Anthropic key", type="password", placeholder="sk-ant-...",
+                value=st.session_state.get("user_anthropic_key", ""),
+                label_visibility="collapsed", key="anthropic_key_input",
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Apply", key="apply_anthropic", use_container_width=True):
+                    if new_anthropic.strip() != st.session_state.get("user_anthropic_key", ""):
+                        st.session_state.user_anthropic_key = new_anthropic.strip()
+                        st.session_state.pop("chatbot_initialized", None)
+                        st.session_state.pop("chatbot", None)
+                    st.rerun()
+            with c2:
+                if st.button("Clear", key="remove_anthropic", use_container_width=True):
+                    st.session_state.user_anthropic_key = ""
+                    st.session_state.pop("chatbot_initialized", None)
+                    st.session_state.pop("chatbot", None)
+                    st.rerun()
+
+        elif "OpenAI" in key_provider:
             st.caption("Get a key at [platform.openai.com](https://platform.openai.com/)")
             new_openai = st.text_input(
                 "OpenAI key", type="password", placeholder="sk-proj-...",
@@ -488,7 +530,8 @@ def main():
                     st.session_state.pop("chatbot_initialized", None)
                     st.session_state.pop("chatbot", None)
                     st.rerun()
-        else:
+
+        else:  # Groq
             st.caption("Free at [console.groq.com](https://console.groq.com/)")
             new_groq = st.text_input(
                 "Groq key", type="password", placeholder="gsk_...",
@@ -582,7 +625,7 @@ def main():
         st.markdown("""
 <div style="font-size:12px;color:#64748b;line-height:1.7">
   <b style="color:#94a3b8">Stack:</b> Streamlit · LangGraph · LangChain<br>
-  <b style="color:#94a3b8">LLMs:</b> OpenAI GPT-4o · Groq Llama 3.3<br>
+  <b style="color:#94a3b8">LLMs:</b> Claude Opus 4.8 · GPT-4o · Groq Llama 3.3<br>
   <b style="color:#94a3b8">RAG:</b> ChromaDB · sentence-transformers<br>
   <b style="color:#94a3b8">Auth:</b> SQLite · bcrypt<br>
   <b style="color:#94a3b8">Search:</b> arXiv · PubMed · Semantic Scholar
@@ -608,8 +651,8 @@ def main():
     <div style="display:flex;gap:6px;flex-wrap:wrap">
       <span style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.3);
                    color:#60a5fa;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500">LangGraph</span>
-      <span style="background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);
-                   color:#34d399;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500">GPT-4o</span>
+      <span style="background:rgba(124,58,237,0.15);border:1px solid rgba(124,58,237,0.3);
+                   color:#a78bfa;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500">Claude / GPT-4o / Groq</span>
       <span style="background:rgba(124,58,237,0.15);border:1px solid rgba(124,58,237,0.3);
                    color:#a78bfa;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:500">ChromaDB</span>
     </div>
@@ -620,10 +663,12 @@ def main():
     # ── Gate: require at least one API key ─────────────────────────────────
     if not active_key:
         st.warning("⚠️ No API key found. Enter your key in the sidebar to start.")
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            st.info("**OpenAI** (Recommended)  \nGet GPT-4o at [platform.openai.com](https://platform.openai.com/)")
+            st.info("**Anthropic** (Recommended)  \nClaude Opus 4.8 at [console.anthropic.com](https://console.anthropic.com/)")
         with c2:
+            st.info("**OpenAI** (GPT-4o)  \nGet a key at [platform.openai.com](https://platform.openai.com/)")
+        with c3:
             st.info("**Groq** (Free tier)  \nGet a key at [console.groq.com](https://console.groq.com/)")
         st.stop()
 
@@ -723,6 +768,10 @@ def main():
                 response = st.write_stream(
                     chatbot.stream_response(user_input, thread_id=st.session_state.thread_id)
                 )
+                # st.write_stream may return a StreamingOutput object (not str) in some
+                # Streamlit builds — especially when the stream ends with an error chunk.
+                # Cast to str so render_copy_btn and session_state storage are always safe.
+                response = str(response) if not isinstance(response, str) else response
                 increment_chat_count(user["id"])
 
                 used_tools = st.session_state.get("_last_tools_used", [])
