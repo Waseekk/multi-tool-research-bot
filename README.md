@@ -1,8 +1,8 @@
 ---
 title: Multi-Agent Tool Calling System
-emoji: 🤖
-colorFrom: red
-colorTo: blue
+emoji: 🔬
+colorFrom: indigo
+colorTo: purple
 sdk: streamlit
 sdk_version: "1.49.1"
 python_version: "3.11"
@@ -11,16 +11,109 @@ pinned: false
 license: mit
 ---
 
-# Multi-Tool Research Bot
+# Research Intelligence Assistant
 
-An AI research assistant built with Streamlit, LangChain, and LangGraph. It routes user queries to specialized research APIs and utility tools through a ReAct agent loop, streaming responses token-by-token.
+A production-grade AI research platform built with Streamlit, LangGraph, and LangChain. It combines a multi-provider LLM stack, a 13-tool ReAct agent, PDF paper analysis with semantic search, user authentication, and token-by-token streaming into a single deployable app.
 
-![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
-![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)
-![Groq](https://img.shields.io/badge/Groq-F55036?style=for-the-badge&logo=groq&logoColor=white)
+[![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io)
+[![Python](https://img.shields.io/badge/Python_3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)](https://langchain.com)
+[![Anthropic](https://img.shields.io/badge/Anthropic_Claude-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://anthropic.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
-**Live Demo:** [multi-tool-research-bot-5pmekpzhczcrdtichq3rw4.streamlit.app](https://multi-tool-research-bot-5pmekpzhczcrdtichq3rw4.streamlit.app/)
+**Live Demo:** [Hugging Face Spaces](https://huggingface.co/spaces/waseek/multi-agent-tool-calling)
+
+---
+
+## Architecture
+
+```
++----------------------------------------------------------+
+|                      Streamlit UI                        |
+|   Hero header  |  Sidebar  |  Chat  |  PDF uploader     |
++----------------------------------------------------------+
+         |
+         v
++----------------------------------------------------------+
+|                     Auth Gate                            |
+|  SQLite + bcrypt  |  20 chats/day limit  |  Admin bypass|
++----------------------------------------------------------+
+         |
+         v
++----------------------------------------------------------+
+|               LangGraph ReAct Graph                      |
+|                                                          |
+|  START                                                   |
+|    |                                                     |
+|    v                                                     |
+|  conversation_manager                                    |
+|    - trims history to last N messages                    |
+|    - builds rolling conversation summary                 |
+|    |                                                     |
+|    v                                                     |
+|  context_llm  <-----------------------+                  |
+|    - selects model by task type       |                  |
+|    - rebuilds system prompt per turn  |                  |
+|    - binds all 13 tools               |                  |
+|    |                                  |                  |
+|    +-- tool call? --> enhanced_tools -+                  |
+|    |                  (runs tool, returns ToolMessage)   |
+|    |                                                     |
+|    +-- final answer --> END (streamed token by token)    |
++----------------------------------------------------------+
+         |                        |
+         v                        v
++-------------------+    +-------------------+
+|   LLM Providers   |    |   Tool Layer      |
+|                   |    |                   |
+|  1. Anthropic     |    |  Academic Search  |
+|     Claude Opus   |    |  - ArXiv          |
+|     Claude Sonnet |    |  - PubMed         |
+|     Claude Haiku  |    |  - Semantic Scholar|
+|                   |    |  - OpenAlex       |
+|  2. OpenAI        |    |  - Find Related   |
+|     GPT-4o        |    |                   |
+|     GPT-4o Mini   |    |  Web & General    |
+|                   |    |  - DuckDuckGo     |
+|  3. Groq          |    |  - Tavily         |
+|     Llama 3.3 70B |    |  - Wikipedia      |
+|     Llama 4 Scout |    |                   |
+|     Llama 3.1 8B  |    |  PDF + Utilities  |
+|                   |    |  - pdf_search     |
+|  Auto fallback    |    |  - Calculator     |
+|  on rate limits   |    |  - Code Analyzer  |
++-------------------+    |  - Weather Info   |
+                         |  - File Generator |
+                         +-------------------+
+                                  |
+                                  v
+                         +-------------------+
+                         |   Data Layer      |
+                         |                   |
+                         |  ChromaDB         |
+                         |  (vector store)   |
+                         |  sentence-        |
+                         |  transformers     |
+                         |  embeddings       |
+                         |                   |
+                         |  SQLite           |
+                         |  (users + usage)  |
+                         +-------------------+
+```
+
+---
+
+## Features
+
+- **Multi-provider LLM** - Anthropic Claude Opus/Sonnet/Haiku, OpenAI GPT-4o/Mini, Groq Llama 3.3/4/3.1 with automatic failover on rate limits
+- **Live model selector** - switch between any available model mid-conversation from the sidebar without losing history
+- **13 research tools** - academic databases, web search, PDF RAG, calculator, code analysis, and more
+- **PDF paper analysis** - upload research papers, ask questions, get page-level citations; powered by ChromaDB and sentence-transformers
+- **User auth** - register/login with bcrypt-hashed passwords, 20 chats/day limit, admin bypass
+- **Token-by-token streaming** - tool progress indicators appear inline before the final answer streams
+- **Tool badges** - colored pill badges show which tools were used in each response
+- **Copy button** - small icon copies the full response to clipboard (works inside Streamlit's iframe sandbox)
+- **Conditional references** - structured citations appended only when tools were used or factual claims were made
 
 ---
 
@@ -29,83 +122,83 @@ An AI research assistant built with Streamlit, LangChain, and LangGraph. It rout
 ### Academic Research
 | Tool | Source | Best for |
 |---|---|---|
-| ArXiv | arxiv.org | Physics, math, CS, engineering preprints |
-| PubMed | NCBI | Biomedical and life sciences |
-| Semantic Scholar | semanticscholar.org | Citation counts, cross-field impact |
-| OpenAlex | openalex.org | Open-access works across all disciplines |
+| arxiv | arxiv.org | CS, physics, math, engineering preprints |
+| pub_med | NCBI PubMed | Biomedical and life sciences |
+| semantic_scholar_search | Semantic Scholar | Citation counts, cross-field impact |
+| openalex_search | OpenAlex | Open-access works across all disciplines |
+| find_related_papers | arXiv + Semantic Scholar | Related papers on a topic, searched in parallel |
+| pdf_search | Uploaded PDFs (ChromaDB) | Semantic search within your own papers |
 
-### General Knowledge & Web
+### Web and General
 | Tool | Source | Best for |
 |---|---|---|
-| Wikipedia | Wikipedia API | Definitions, background, factual summaries |
-| DuckDuckGo | DuckDuckGo Search | Current news and real-time web results |
-| Tavily | Tavily API | AI-optimized web search (optional) |
+| wikipedia | Wikipedia API | Definitions, background, factual summaries |
+| duckduckgo_search | DuckDuckGo | Current news and real-time web results |
+| tavily_search_results_json | Tavily API | AI-optimized web search (requires API key) |
 
 ### Utilities
 | Tool | Description |
 |---|---|
-| Calculator | Safe eval of math expressions — no hallucinated arithmetic |
-| Code Analyzer | Syntax checking and basic static analysis |
-| Weather Info | Current conditions by city (demo/simulated) |
-| File Generator | Generates CSV, JSON, Python, or Markdown content |
+| calculator | Safe eval of math expressions - no hallucinated arithmetic |
+| code_analyzer | Syntax checking and basic static analysis |
+| weather_info | Current conditions by city (demo data) |
+| file_content_generator | Generates CSV, JSON, Python, or Markdown content |
 
 ---
 
-## Architecture
+## LLM Provider Chain
 
-The app uses a **LangGraph ReAct loop** — a single agent that reasons, calls tools, observes results, and continues until it has enough information to respond.
+The system auto-detects available API keys and builds the fallback chain at startup:
 
 ```
-User message
-    │
-    ▼
-conversation_manager   — trims history, builds rolling summary from last 3 questions
-    │
-    ▼
-context_llm            — LLM decides: answer directly, or call one or more tools
-    │
-    ├── tool call(s) ──► enhanced_tools ──► back to context_llm
-    │
-    └── final answer ──► streamed to user token-by-token
+If ANTHROPIC_API_KEY is set:
+  1. claude-opus-4-8        (primary   - most capable, best research reasoning)
+  2. claude-sonnet-4-6      (secondary - fast, excellent quality)
+  3. gpt-4o-mini            (fallback  - if OPENAI_API_KEY also set)
+  4. llama-3.3-70b          (fallback  - if GROQ_API_KEY also set)
+
+If only OPENAI_API_KEY is set:
+  1. gpt-4o                 (primary)
+  2. gpt-4o-mini            (secondary)
+  3. llama-3.3-70b          (fallback  - if GROQ_API_KEY also set)
+
+If only GROQ_API_KEY is set:
+  1. llama-3.3-70b-versatile                    (primary)
+  2. meta-llama/llama-4-scout-17b-16e-instruct  (secondary)
+  3. llama-3.1-8b-instant                       (fallback)
 ```
 
-**LLM stack (Groq inference, in fallback order):**
-1. `llama-3.3-70b-versatile` — primary
-2. `llama-3.1-70b-versatile` — secondary
-3. `mixtral-8x7b-32768` — fallback
-4. `llama-3.1-8b-instant` — fast fallback
-5. `gemma2-9b-it` — last resort
-
-Each task type uses a tuned temperature: `0.0` for math and code, `0.05–0.1` for analysis and research, `0.7` for creative tasks.
-
-**Key design decisions:**
-- System prompt is rebuilt on every turn (not cached) so context summary and last-used tool are always current
-- Per-session `thread_id` (UUID) gives each browser tab its own isolated conversation memory via LangGraph's `MemorySaver`
-- Streaming uses `stream_mode="messages"` — tool-use indicators (`Searching with arxiv...`) appear inline before the final answer streams
+Failed models enter a 60-second cooldown before being retried. Task routing selects temperature automatically: `0.0` for math and code, `0.1` for research and analysis, `0.7` for creative tasks.
 
 ---
 
 ## Project Structure
 
 ```
-├── app.py                  # Streamlit UI + StreamlitChatbot class + LangGraph graph assembly
-├── src/
-│   ├── tools.py            # All 11 tool definitions and initialization
-│   ├── models.py           # EnhancedLLM (fallback chain, task temperatures), ConversationState
-│   ├── nodes.py            # LangGraph nodes: context_llm, enhanced_tools, task routing
-│   └── conversation.py     # History trimming and rolling conversation summary
+Multi-tool Research Bot Assistant/
+├── app.py                  # Streamlit UI, LangGraph graph assembly, streaming
+├── requirements.txt
 ├── .streamlit/
-│   ├── config.toml         # Theme and server config
-│   └── secrets.toml        # API keys for Streamlit Cloud (gitignored)
-├── Dockerfile              # Container deployment
-└── requirements.txt
+│   ├── config.toml         # Theme, server settings
+│   └── secrets.toml        # API keys for cloud deployment (gitignored)
+├── data/                   # Auto-created at runtime (gitignored)
+│   ├── auth.db             # SQLite: users and daily usage
+│   └── chroma_db/          # ChromaDB: PDF vector embeddings
+└── src/
+    ├── __init__.py
+    ├── models.py           # EnhancedLLM (multi-provider failover), ConversationState
+    ├── nodes.py            # LangGraph nodes: context_llm, enhanced_tools, task routing
+    ├── tools.py            # All 13 tool definitions, contextvars for user/PDF context
+    ├── conversation.py     # History trimming and rolling conversation summary
+    ├── auth.py             # SQLite auth: register, login, daily limit enforcement
+    └── rag.py              # PDFProcessor (PyMuPDF) + ResearchVectorStore (ChromaDB)
 ```
 
 ---
 
 ## Getting Started
 
-**Prerequisites:** Python 3.9+, a [Groq API key](https://console.groq.com/)
+**Requirements:** Python 3.11+, at least one API key (Anthropic, OpenAI, or Groq)
 
 ```bash
 git clone https://github.com/Waseekk/multi-tool-research-bot.git
@@ -113,16 +206,19 @@ cd multi-tool-research-bot
 
 python -m venv venv
 venv\Scripts\activate        # Windows
-# source venv/bin/activate   # macOS/Linux
+# source venv/bin/activate   # macOS / Linux
 
 pip install -r requirements.txt
 ```
 
-Create a `.env` file:
+Create a `.env` file (include whichever keys you have):
 
 ```env
-GROQ_API_KEY=your_groq_api_key_here
-TAVILY_API_KEY=your_tavily_api_key_here   # optional
+ANTHROPIC_API_KEY=sk-ant-...        # Recommended - Claude Opus 4.8
+OPENAI_API_KEY=sk-proj-...          # Optional - GPT-4o fallback
+GROQ_API_KEY=gsk_...                # Optional - free tier fallback
+TAVILY_API_KEY=tvly-...             # Optional - enhanced web search
+ADMIN_PASSWORD=your_admin_password  # Password for the admin account
 ```
 
 Run:
@@ -131,14 +227,20 @@ Run:
 streamlit run app.py
 ```
 
+The first PDF upload downloads the embedding model (~420 MB, one-time only). Subsequent uploads are fast.
+
 ---
 
 ## Deployment
 
+### Hugging Face Spaces
+1. Push to a Hugging Face Space repository
+2. Add API keys under Settings > Repository secrets
+
 ### Streamlit Cloud
 1. Push to GitHub
 2. Connect at [streamlit.io/cloud](https://streamlit.io/cloud)
-3. Add `GROQ_API_KEY` (and optionally `TAVILY_API_KEY`) under **Settings > Secrets**
+3. Add API keys under Settings > Secrets
 
 ### Docker
 ```bash
@@ -148,12 +250,20 @@ docker run -p 8501:8501 --env-file .env research-bot
 
 ---
 
-## Known Limitations
+## Tech Stack
 
-- Weather data is simulated — not connected to a live API
-- Code analysis covers syntax only, not semantic correctness
-- DuckDuckGo may occasionally rate-limit on high-frequency requests
-- Conversation memory is in-process (`MemorySaver`) and does not persist across server restarts
+| Layer | Technology |
+|---|---|
+| UI | Streamlit |
+| Agent framework | LangGraph (ReAct loop) |
+| LLM orchestration | LangChain |
+| LLM providers | Anthropic, OpenAI, Groq |
+| PDF processing | PyMuPDF |
+| Vector store | ChromaDB (persistent, on-disk) |
+| Embeddings | sentence-transformers/all-mpnet-base-v2 |
+| Auth | SQLite + bcrypt |
+| Web search | DuckDuckGo, Tavily |
+| Academic APIs | arXiv, PubMed, Semantic Scholar, OpenAlex |
 
 ---
 
