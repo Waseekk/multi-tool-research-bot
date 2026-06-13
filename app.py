@@ -186,6 +186,10 @@ class StreamlitChatbot:
                 self.conversation_manager = ConversationManager()
                 self.memory              = MemorySaver()
                 self.graph               = self._build_graph()
+                # Re-apply any model the user had selected before the chatbot was rebuilt
+                saved_model = st.session_state.get("selected_model_name")
+                if saved_model:
+                    self.llm_manager.user_forced_model = saved_model
                 st.session_state.chatbot_initialized = True
                 st.session_state.chatbot = self
         else:
@@ -498,6 +502,56 @@ def main():
             f"</div>",
             unsafe_allow_html=True,
         )
+
+        # ── Model selector ────────────────────────────────────────────────
+        # Build available models dynamically based on which keys are active.
+        # Shown above the key configurator so the user can pick before chatting.
+        model_options = []   # list of (label, model_name, provider)
+        if active_anthropic:
+            model_options += [
+                ("Claude Opus 4.8 — Most capable",          "claude-opus-4-8",                         "anthropic"),
+                ("Claude Sonnet 4.6 — Fast + capable",      "claude-sonnet-4-6",                       "anthropic"),
+                ("Claude Haiku 4.5 — Fastest / cheapest",   "claude-haiku-4-5-20251001",               "anthropic"),
+            ]
+        if active_openai:
+            model_options += [
+                ("GPT-4o — Best OpenAI",                    "gpt-4o",                                  "openai"),
+                ("GPT-4o Mini — Fast + cheap",              "gpt-4o-mini",                             "openai"),
+            ]
+        if active_groq:
+            model_options += [
+                ("Llama 3.3 70B — Best Groq",               "llama-3.3-70b-versatile",                 "groq"),
+                ("Llama 4 Scout 17B",                       "meta-llama/llama-4-scout-17b-16e-instruct","groq"),
+                ("Llama 3.1 8B — Ultra fast",               "llama-3.1-8b-instant",                    "groq"),
+            ]
+
+        if model_options:
+            selected_model_idx = st.selectbox(
+                "Active model:",
+                range(len(model_options)),
+                format_func=lambda i: model_options[i][0],
+                key="model_selector_idx",
+            )
+            chosen_name     = model_options[selected_model_idx][1]
+            chosen_provider = model_options[selected_model_idx][2]
+
+            # Persist selection and apply immediately to the running llm_manager
+            st.session_state.selected_model_name = chosen_name
+            chatbot_obj = st.session_state.get("chatbot")
+            if chatbot_obj:
+                chatbot_obj.llm_manager.user_forced_model = chosen_name
+                # Also update current_config so the sidebar status badge stays in sync
+                all_cfgs = (
+                    [chatbot_obj.llm_manager.primary_config,
+                     chatbot_obj.llm_manager.secondary_config]
+                    + chatbot_obj.llm_manager.fallback_configs
+                )
+                for cfg in all_cfgs:
+                    if cfg.name == chosen_name:
+                        chatbot_obj.llm_manager.current_config = cfg
+                        break
+
+        st.markdown("---")
 
         # Dropdown to choose which provider key to configure
         key_provider = st.selectbox(
