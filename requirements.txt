@@ -21,6 +21,7 @@ xmltodict>=0.13.0
 
 # Auth
 bcrypt>=4.0.0
+streamlit-google-auth>=1.1.8
 
 # PDF processing
 PyMuPDF>=1.24.0

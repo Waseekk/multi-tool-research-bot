@@ -22,6 +22,8 @@ import streamlit as st
 import os
 import base64
 import uuid
+import json
+import tempfile
 from typing import List, Dict, Any
 from datetime import datetime
 
@@ -31,8 +33,9 @@ load_dotenv()
 # Streamlit Cloud secrets (sets env vars before any module reads them)
 if hasattr(st, "secrets"):
     try:
-        for key in ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY"):
-            if key in st.secrets:
+        for key in ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY",
+                    "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI", "COOKIE_SECRET"):
+            if key in st.secrets and st.secrets[key]:
                 os.environ[key] = st.secrets[key]
     except Exception:
         pass
@@ -50,6 +53,7 @@ from src.auth import (
     init_db, login_user, register_user,
     is_daily_limit_reached, increment_chat_count,
     get_chat_count_today, DAILY_LIMIT,
+    login_or_create_google_user,
 )
 from src.tools import _active_user_id, _active_pdf_names
 
@@ -365,6 +369,53 @@ class StreamlitChatbot:
 # Auth page
 # ---------------------------------------------------------------------------
 
+@st.cache_resource
+def _get_google_credentials_file() -> str:
+    """
+    Build a temporary Google OAuth credentials JSON from env vars and return
+    its file path. Cached per server process so the temp file is only written once.
+    Returns empty string if GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are not set.
+    """
+    client_id     = os.getenv("GOOGLE_CLIENT_ID",     "").strip()
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        return ""
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501/")
+    creds = {
+        "web": {
+            "client_id":     client_id,
+            "client_secret": client_secret,
+            "redirect_uris": [redirect_uri],
+            "auth_uri":  "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    json.dump(creds, tmp)
+    tmp.close()
+    return tmp.name
+
+
+def _make_google_authenticator():
+    """
+    Return a streamlit_google_auth.Authenticate instance using env-var credentials,
+    or None if credentials are not configured or the package is not installed.
+    """
+    creds_file = _get_google_credentials_file()
+    if not creds_file:
+        return None
+    try:
+        from streamlit_google_auth import Authenticate
+        return Authenticate(
+            secret_credentials_path=creds_file,
+            cookie_name="research_bot_auth",
+            cookie_key=os.getenv("COOKIE_SECRET", "research-bot-secret-key-2024"),
+            redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501/"),
+        )
+    except ImportError:
+        return None
+
+
 def _show_auth_page() -> None:
     """Login / register screen shown when no active session exists."""
     # Hero
@@ -395,6 +446,29 @@ def _show_auth_page() -> None:
 
     col = st.columns([1, 2, 1])[1]
     with col:
+        # ── Google Sign-In (shown only when credentials are configured) ────
+        authenticator = _make_google_authenticator()
+        if authenticator:
+            authenticator.check_authentification()
+
+            if st.session_state.get("connected"):
+                # Google OAuth completed — upsert user in DB and enter app
+                user_info = st.session_state.get("user_info", {})
+                email = user_info.get("email", "")
+                name  = user_info.get("name", "")
+                if email:
+                    db_user = login_or_create_google_user(email, name)
+                    st.session_state.logged_in_user = db_user
+                    st.session_state.google_login   = True
+                    st.rerun()
+
+            authenticator.login()
+            st.markdown(
+                "<p style='text-align:center;color:#94a3b8;font-size:12px;margin:4px 0 12px'>or sign in with email below</p>",
+                unsafe_allow_html=True,
+            )
+
+        # ── Email / password tabs (always shown as fallback) ─────────────
         tab_login, tab_register = st.tabs(["🔐 Login", "📝 Register"])
 
         with tab_login:
@@ -500,7 +574,16 @@ def main():
             )
 
         if st.button("🚪 Logout", use_container_width=True):
-            for k in ("logged_in_user", "chatbot_initialized", "chatbot", "messages", "thread_id",
+            # Clear Google OAuth cookie if this was a Google login
+            if st.session_state.get("google_login"):
+                try:
+                    auth = _make_google_authenticator()
+                    if auth:
+                        auth.logout()
+                except Exception:
+                    pass
+            for k in ("logged_in_user", "google_login", "connected", "user_info",
+                      "chatbot_initialized", "chatbot", "messages", "thread_id",
                       "user_anthropic_key", "user_openai_key", "user_groq_key"):
                 st.session_state.pop(k, None)
             st.rerun()

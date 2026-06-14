@@ -179,3 +179,32 @@ def is_daily_limit_reached(user_id: int, is_admin: bool) -> bool:
     if is_admin:
         return False
     return get_chat_count_today(user_id) >= DAILY_LIMIT
+
+
+def login_or_create_google_user(email: str, name: str) -> dict:
+    """
+    Upsert a Google OAuth user. Returns the same dict shape as login_user():
+    {id, email, is_admin}. OAuth accounts have an empty password_hash since
+    they authenticate via Google — they can't use the email/password form.
+
+    Admin auto-detection: if the email matches ADMIN_EMAIL, is_admin is set to 1.
+    """
+    email = email.strip().lower()
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, email, is_admin FROM users WHERE email = ?", (email,)
+        ).fetchone()
+        if row:
+            return {"id": row["id"], "email": row["email"], "is_admin": bool(row["is_admin"])}
+
+        # New Google user — no password needed
+        is_admin = 1 if email == ADMIN_EMAIL else 0
+        conn.execute(
+            "INSERT INTO users (email, password_hash, is_admin) VALUES (?, ?, ?)",
+            (email, "", is_admin),
+        )
+        conn.commit()
+        new_id = conn.execute(
+            "SELECT id FROM users WHERE email = ?", (email,)
+        ).fetchone()["id"]
+        return {"id": new_id, "email": email, "is_admin": bool(is_admin)}
