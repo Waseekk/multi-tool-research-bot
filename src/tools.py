@@ -35,6 +35,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_core.tools import tool
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Per-request context variables
@@ -66,7 +69,7 @@ except ImportError:
         TAVILY_AVAILABLE = True
     except ImportError:
         TAVILY_AVAILABLE = False
-        print("Tavily not available. Install with: pip install langchain-community")
+        logger.warning("Tavily not available. Install with: pip install langchain-community")
 
 
 # ---------------------------------------------------------------------------
@@ -564,9 +567,9 @@ def initialize_tools() -> List:
                     description="Search the web for recent news and real-time information.",
                 )
             tools_list.append(tavily_tool)
-            print("Tavily search tool initialized successfully")
+            logger.info("Tavily search tool initialized")
         except Exception as e:
-            print(f"Tavily search not available: {e}")
+            logger.warning("Tavily search not available: %s", e)
 
     # DuckDuckGo requires no key and is the always-on web search fallback
     try:
@@ -574,9 +577,9 @@ def initialize_tools() -> List:
             api_wrapper=DuckDuckGoSearchAPIWrapper(max_results=5),
             description="Search the web using DuckDuckGo for current information and news.",
         ))
-        print("DuckDuckGo search tool initialized successfully")
+        logger.info("DuckDuckGo search tool initialized")
     except Exception as e:
-        print(f"DuckDuckGo not available: {e}")
+        logger.warning("DuckDuckGo not available: %s", e)
 
     tools_list.extend([
         calculator,
@@ -591,9 +594,9 @@ def initialize_tools() -> List:
     # PDF search only added when RAG dependencies are installed
     if RAG_AVAILABLE:
         tools_list.append(pdf_search)
-        print("PDF search tool initialized successfully")
+        logger.info("PDF search tool initialized")
     else:
-        print("PDF search not available (install chromadb + sentence-transformers)")
+        logger.warning("PDF search not available (install chromadb + sentence-transformers)")
 
-    print(f"Initialized {len(tools_list)} tools successfully")
+    logger.info("Initialized %d tools successfully", len(tools_list))
     return tools_list

@@ -17,7 +17,7 @@ extend, or debug the codebase.
 6. [PDF RAG Pipeline](#pdf-rag-pipeline)
 7. [Authentication and Usage Limits](#authentication-and-usage-limits)
 8. [Streaming Architecture](#streaming-architecture)
-9. [Multi-Agent Architecture (Planned)](#multi-agent-architecture-planned)
+9. [Multi-Agent Architecture](#multi-agent-architecture)
 
 ---
 
@@ -41,19 +41,20 @@ Browser
                                      | LangGraph state machine
                                      v
 +-----------------------------------------------------------+
-|  LangGraph Compiled Graph                                 |
+|  LangGraph Multi-Agent Graph                              |
 |                                                           |
 |  conversation_manager                                     |
 |         |                                                 |
 |         v                                                 |
-|  context_llm  <---------+                                |
-|         |               |                                |
-|    tool calls?     tool results                          |
-|         |               |                                |
-|         v               |                                |
-|  enhanced_tools ---------+                               |
-|         |                                                |
-|    final answer --> END                                   |
+|  supervisor_node (keyword router, no LLM call)            |
+|         |                    |                            |
+|         v                    v                            |
+|  research_agent        pdf_agent                          |
+|  <-> research_tools    <-> pdf_tools                      |
+|  (ReAct loop)          (ReAct loop)                       |
+|         |                    |                            |
+|    final answer         final answer                      |
+|         +---------> END <----+                            |
 +-----------------------------------------------------------+
        |            |              |
        v            v              v
@@ -111,31 +112,31 @@ streaming.
      the system prompt on every turn
    |
    v
-7. LangGraph: context_llm node (the main reasoning step)
-   - get_task_optimized_llm() keyword-routes to model + temperature
-     (e.g. "calculate" -> temp=0.0, "research" -> temp=0.1)
-   - if user_forced_model is set (sidebar model selector), that
-     overrides task routing entirely
-   - builds a fresh system prompt with: conversation summary,
-     last tool used, list of uploaded PDF names
-   - strips old SystemMessage from history, prepends new one
-     (so the system prompt is always current, not frozen at turn 1)
-   - llm.bind_tools(tools).invoke(messages)
-   - if the LLM decides to call tools, it returns an AIMessage
-     with tool_calls populated; LangGraph routes to enhanced_tools
-   - if the LLM has enough info to answer, it returns a plain
-     AIMessage; LangGraph routes to END
+7. LangGraph: supervisor_node (keyword-based routing, no LLM call)
+   - reads last HumanMessage from state
+   - checks _active_pdf_names ContextVar to know if PDFs are loaded
+   - pdf_keywords (e.g. "my paper", "this document") + has_pdfs
+     -> routes to pdf_agent
+   - research_keywords (e.g. "find papers", "arxiv") -> research_agent
+   - ambiguous query + has_pdfs -> pdf_agent (default with papers)
+   - no papers, no clear signal -> research_agent
    |
-   v
-8. LangGraph: enhanced_tools node (only if tools were called)
-   - wraps LangGraph's built-in ToolNode
-   - dispatches each tool call by name
-   - returns ToolMessage results back into state
-   - records last_tool_used for the next system prompt
-   - on tool crash: returns a graceful ToolMessage with the error
-     so the LLM can try a different approach
+   +---> research_agent (ReAct loop, 12 tools)
+   |       - get_task_optimized_llm() keyword-routes model + temperature
+   |       - builds fresh system prompt each turn (summary, last tool,
+   |         pdf context) by stripping + prepending SystemMessage
+   |       - llm.bind_tools(research_tools).invoke(messages)
+   |       - if tool_calls present: routes to research_tools node
+   |       - if no tool_calls: routes to END
+   |       - on failure: walks primary→secondary→fallback chain
    |
-   (loop back to step 7 until LLM produces a final answer)
+   +---> pdf_agent (ReAct loop, 4 tools)
+           - same structure as research_agent
+           - tools: pdf_search, arxiv, semantic_scholar, find_related_papers
+           - system prompt instructs: search paper first, then find
+             related external literature, then suggest Further Reading
+   |
+   (each agent loops with its own ToolNode until final answer)
    |
    v
 9. app.py: stream_response() yields text chunks to st.write_stream
@@ -499,23 +500,22 @@ document.body.removeChild(ta);
 
 ---
 
-## Multi-Agent Architecture (Planned)
+## Multi-Agent Architecture
 
-**Current state:** The app runs a single-agent ReAct loop. All 13 tools are available to
-one agent that handles every query - whether it's a PDF question, academic search, or
-web query.
+**Status: Fully implemented** (as of commit `12b393a`). The app runs two specialized
+sub-agents routed by a lightweight keyword supervisor.
 
-**Why upgrade to multi-agent?**
+**Why multi-agent?**
 
-A single agent with 13 tools has to decide which tool to use on every turn. This leads to:
-- Tool confusion: agent sometimes calls arxiv when the user is asking about their PDF
-- Inefficiency: the full tool list is bound to every LLM call even when only 2-3 are relevant
-- No specialization: the system prompt tries to cover every scenario in one block
+A single agent with 13 tools had to decide which tool to use on every turn, leading to:
+- Tool confusion: agent sometimes called arxiv when the user was asking about their PDF
+- Inefficiency: the full tool list was bound to every LLM call even when only 2-3 were relevant
+- No specialization: one system prompt tried to cover every scenario
 
-A supervisor pattern solves this by routing each query to a specialized sub-agent that
-has only the tools it needs and a focused system prompt.
+The supervisor pattern fixes this by routing each query to a specialized sub-agent with
+only the tools it needs and a focused system prompt.
 
-**Planned graph design:**
+**Implemented graph** (`src/nodes.py`, `app.py::_build_graph()`):
 
 ```
 START
@@ -524,100 +524,61 @@ START
 conversation_manager
   |
   v
-supervisor_node
-  - lightweight keyword router (no LLM call - fast)
-  - checks: does the query mention PDFs? are PDFs loaded?
-  - routes to one of two agents
+supervisor_node  (keyword router, no LLM call — ~0ms overhead)
   |
   +-----> research_agent <--> research_tools_node
-  |              |             (arxiv, pubmed, scholar, openalex,
-  |         [loop until]        find_related, web, wikipedia,
-  |          final answer       calculator, code, weather, file)
+  |              |             arxiv, pub_med, semantic_scholar, openalex,
+  |         [ReAct loop]       find_related_papers, wikipedia, duckduckgo,
+  |          until answer       tavily, calculator, code_analyzer,
+  |                             weather_info, file_content_generator
   |
   +-----> pdf_agent <--> pdf_tools_node
-                 |        (pdf_search, arxiv, semantic_scholar)
-            [loop until]
-             final answer
+                 |        pdf_search, arxiv, semantic_scholar,
+            [ReAct loop]   find_related_papers
+             until answer
 ```
 
-**Supervisor routing logic (keyword-based, no LLM call):**
+**Supervisor routing logic** (`src/nodes.py::supervisor_node`):
 
 ```python
-def supervisor_node(state):
-    msg = last_human_message(state).lower()
-    has_pdfs = bool(state.get("active_pdfs"))
+pdf_keywords      = ["pdf", "paper", "document", "uploaded", "my paper", ...]
+research_keywords = ["find papers", "latest research", "arxiv", "pubmed", ...]
 
-    pdf_keywords = ["pdf", "my paper", "this paper", "the document",
-                    "uploaded", "what does it say"]
-    research_keywords = ["find papers", "latest research", "arxiv",
-                         "pubmed", "search for", "recent studies"]
-
-    if has_pdfs and any(kw in msg for kw in pdf_keywords):
-        return {"current_agent": "pdf"}
-    elif any(kw in msg for kw in research_keywords):
-        return {"current_agent": "research"}
-    elif has_pdfs:
-        # Default to pdf_agent when papers are loaded
-        return {"current_agent": "pdf"}
-    else:
-        return {"current_agent": "research"}
+if has_pdfs and any(kw in msg for kw in pdf_keywords):
+    agent = "pdf"
+elif any(kw in msg for kw in research_keywords):
+    agent = "research"
+elif has_pdfs:
+    agent = "pdf"   # default when papers are loaded
+else:
+    agent = "research"
 ```
 
-**PDF agent system prompt focus (planned):**
+**PDF agent system prompt** (`src/nodes.py::_pdf_prompt`) focuses on:
+1. Always call `pdf_search` first (at most once)
+2. Then call `find_related_papers` OR `arxiv` once to connect to external literature
+3. Response structure: From the Paper → Research Context → Methodology Rationale →
+   Limitations and Future Work → **Further Reading** (1-2 related paper suggestions)
+4. Cite every claim: `[Paper: title, Page: N]` for uploaded docs, `(Author et al., Year)` for external
 
-```
-1. Always call pdf_search first to ground the answer in the uploaded paper
-2. Then call arxiv or semantic_scholar to find related external work
-3. Connect the paper to the broader research landscape:
-   - What prior work does this build on?
-   - What problem is solved, and why this approach?
-   - What are the open problems and future directions?
-4. Cite everything: [Paper: title, Page: N] for uploaded docs,
-   (Author et al., Year) for external papers
-```
+**Research agent system prompt** (`src/nodes.py::_research_prompt`) focuses on:
+1. Pick the most relevant 1-2 sources (never duplicate tool calls)
+2. Synthesize findings with methodology rationale and research context
+3. Identify consensus vs. active debates, suggest future directions
+4. Use `find_related_papers` instead of calling arxiv + semantic_scholar separately
 
-**Research agent system prompt focus (planned):**
-
-```
-1. Pick the most relevant 1-2 sources (not all of them)
-2. Synthesize findings - do not just summarize API output
-3. Explain methodology rationale and research context
-4. Identify consensus vs. active debates
-5. Suggest future research directions
-```
-
-**What changes in the code:**
-
-```
-Current code:                      After multi-agent upgrade:
-
-src/nodes.py                       src/nodes.py
-  create_enhanced_nodes()            create_enhanced_nodes()
-    context_aware_llm                  supervisor_node()
-    enhanced_tool_node                 research_agent_node()
-                                       pdf_agent_node()
-                                       research_tool_node
-                                       pdf_tool_node
-
-app.py _build_graph():             app.py _build_graph():
-  conversation_manager               conversation_manager
-  -> context_llm                     -> supervisor
-  <-> enhanced_tools                 -> research_agent <-> research_tools
-                                     -> pdf_agent     <-> pdf_tools
-```
-
-**State schema additions needed for multi-agent:**
-
+**Tool split** (`src/nodes.py::create_agent_nodes`):
 ```python
-class ConversationState(TypedDict):
-    # existing fields ...
-    current_agent: str       # "research" | "pdf"
-    active_pdfs:   List[str] # PDF names loaded for this user
+PDF_TOOL_NAMES = {"pdf_search", "arxiv", "semantic_scholar_search", "find_related_papers"}
+research_tools = [t for t in tools if t.name not in {"pdf_search"}]
+pdf_tools      = [t for t in tools if t.name in PDF_TOOL_NAMES]
 ```
 
-**Implementation estimate:** 3-4 hours. The supervisor node and routing logic are small.
-The main work is splitting the system prompt into two focused prompts and wiring the
-separate ToolNodes in the graph.
+**State schema** (`src/models.py::ConversationState`):
+```python
+current_agent: str       # "research" | "pdf" — set by supervisor
+active_pdfs:   List[str] # PDF names loaded for this user session
+```
 
 ---
 
@@ -626,11 +587,15 @@ separate ToolNodes in the graph.
 | Decision | Choice | Reason |
 |---|---|---|
 | State machine | LangGraph ReAct | Built-in MemorySaver, streaming, tool routing |
+| Multi-agent routing | Keyword supervisor (no LLM) | Zero latency; LLM-based classifier adds a full round-trip just to route |
 | Conversation memory | MemorySaver (in-process) | No DB writes needed for conversation |
-| PDF embeddings | all-mpnet-base-v2 (768-dim) | Better semantic quality for scientific text |
-| Vector store | ChromaDB persistent | Survives restarts, metadata filtering built-in |
-| Tool context passing | ContextVar (not session_state) | Thread-safe in LangGraph callbacks |
+| PDF embeddings | all-mpnet-base-v2 (768-dim) | Better semantic quality for scientific text vs. smaller MiniLM models |
+| Vector store | ChromaDB persistent | Survives restarts, metadata filtering for per-user isolation |
+| Tool context passing | ContextVar (not session_state) | Thread-safe in LangGraph callbacks; session_state is unreliable across threads |
 | Auth storage | SQLite | Zero infrastructure, file-based, simple schema |
+| Google OAuth PKCE | Verifier in `state` param | Streamlit session state lost on browser redirect; Google echoes `state` back unchanged |
+| LLM provider | Auto-detect from keys, `LLM_PROVIDER` override | Works with any key combination; pin a provider without removing other keys |
 | Clipboard copy | execCommand via hidden textarea | navigator.clipboard blocked in Streamlit iframes |
 | Anthropic streaming | Extract from content list | Anthropic chunks are typed blocks, not plain strings |
-| Recursion limit | 12 | Allows 5 tool cycles; 5 was too tight for Claude Opus |
+| Recursion limit | 12 | Allows 5 tool cycles; 5 was too tight for Claude Opus (calls 2-3 tools per query) |
+| Logging | RotatingFileHandler + console | Structured logs survive restarts; print() lost context on level/timestamp |

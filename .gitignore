@@ -79,3 +79,10 @@ htmlcov/
 *.temp
 
 # Documentation is tracked - removed docs/ exclusion
+
+# Claude Code project docs (local only, auto-regenerated)
+CLAUDE.md
+memory/
+
+# Log output directory
+logs/

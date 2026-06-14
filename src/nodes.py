@@ -30,6 +30,9 @@ from langchain_core.messages import (
 from langgraph.prebuilt import ToolNode, tools_condition
 from .models import ConversationState, EnhancedLLM
 from .tools import _active_pdf_names
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +81,7 @@ def supervisor_node(state: ConversationState) -> dict:
     else:
         agent = "research"
 
-    print(f"[supervisor] -> {agent}_agent (has_pdfs={has_pdfs})")
+    logger.info("supervisor -> %s_agent (has_pdfs=%s)", agent, has_pdfs)
     return {"current_agent": agent, "active_pdfs": list(pdf_names)}
 
 
@@ -149,16 +152,19 @@ ACTIVE CONTEXT:
 YOUR MISSION: Help the user deeply understand their uploaded research paper and
 connect it to the broader academic landscape.
 
-TOOL SELECTION:
-CRITICAL RULE: Call each tool AT MOST ONCE per response. Never repeat a tool call.
+TOOL SELECTION — STRICT BUDGET: maximum 3 tool calls total, then STOP and write your answer.
 
-1. ALWAYS call pdf_search first to ground the answer in the actual paper.
-   Cite every claim as [Paper: title, Page: N].
+Step 1 (mandatory, exactly once): call pdf_search with ONE broad query that covers the full question.
+         Do NOT call pdf_search a second time — the first call already returns the 6 best matching
+         chunks from the paper. A second call will return the same content.
 
-2. After answering from the paper, call find_related_papers OR arxiv ONCE to
-   connect it to external literature. Do not call both.
+Step 2 (optional, exactly once): call find_related_papers OR arxiv to connect to external literature.
+         Choose one — never call both.
 
-3. Call semantic_scholar_search only if you specifically need citation counts.
+Step 3 (optional, exactly once): call semantic_scholar_search ONLY if the user explicitly asked
+         for citation counts or impact metrics.
+
+After completing your tool calls, write your full answer immediately. No further tool calls.
 
 ANALYSIS DEPTH — address all of these in every answer:
 - What does the paper say? (direct citations with page numbers)
@@ -171,6 +177,9 @@ RESPONSE STRUCTURE (use these sections):
 - **Research Context** — how this relates to prior or concurrent work
 - **Methodology Rationale** — why this approach, what alternatives exist
 - **Limitations and Future Work** — what the authors acknowledge as gaps
+- **Further Reading** — always suggest 1-2 related papers the user might find
+  useful based on the paper's topic or cited works. Use find_related_papers to
+  discover them if you haven't already called it in this response.
 
 CITATIONS:
 - Uploaded PDFs: [Paper: title, Page: N]
@@ -232,7 +241,7 @@ def _make_llm_node(
 
             response      = llm_with_tools.invoke(full_messages)
             current_model = llm_manager.get_current_model_name()
-            print(f"[{agent_label}_agent] {llm_manager.get_provider()}/{current_model}")
+            logger.info("%s_agent: %s/%s", agent_label, llm_manager.get_provider(), current_model)
 
             return {
                 "messages":           [response],
@@ -241,11 +250,12 @@ def _make_llm_node(
             }
 
         except Exception as e:
-            print(f"[{agent_label}_agent] LLM error: {e}")
+            logger.error("%s_agent: LLM call failed: %s", agent_label, e)
             error_count = state.get("error_count", 0) + 1
             last_error  = str(e)
 
-            # Walk fallback chain — skip the model that just failed
+            # Walk fallback chain in declared order, skipping the model that just failed.
+            # Each config is tried in turn; the first successful response wins.
             failed_model = llm_manager.get_current_model_name()
             all_configs  = (
                 [llm_manager.primary_config, llm_manager.secondary_config]
@@ -259,13 +269,15 @@ def _make_llm_node(
                     fallback_llm = llm_manager._create_llm_instance(config)
                     if not fallback_llm:
                         continue
-                    # Groq 8b has a 6000 TPM cap — trim history to avoid 413
+                    # llama-3.1-8b-instant has a hard 6000 TPM cap on the free Groq
+                    # tier. Long conversations easily exceed this and get a 413.
+                    # Trim to system + last 3 messages to stay safely under the limit.
                     msgs_to_send = messages
                     if config.provider == "groq" and config.max_tokens <= 2048:
                         msgs_to_send = messages[:1] + messages[-3:]
                     response = fallback_llm.bind_tools(tools).invoke(msgs_to_send)
                     llm_manager.current_config = config
-                    print(f"[{agent_label}_agent] Switched to fallback: {config.name}")
+                    logger.info("%s_agent: switched to fallback %s", agent_label, config.name)
                     return {
                         "messages":           [response],
                         "error_count":        0,
@@ -273,7 +285,7 @@ def _make_llm_node(
                     }
                 except Exception as fe:
                     last_error = str(fe)
-                    print(f"[{agent_label}_agent] Fallback {config.name} failed: {fe}")
+                    logger.warning("%s_agent: fallback %s failed: %s", agent_label, config.name, fe)
                     continue
 
             is_rate_limit = "429" in last_error or "rate limit" in last_error.lower()
@@ -310,7 +322,7 @@ def _make_tool_node(tools: List) -> Callable:
             return result
 
         except Exception as e:
-            print(f"[tool_node] Error: {e}")
+            logger.error("tool_node: %s", e)
             messages    = state.get("messages", [])
             last_ai_msg = next(
                 (m for m in reversed(messages)

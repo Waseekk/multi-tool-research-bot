@@ -17,15 +17,14 @@ app.py imports both to build the LangGraph graph.
 
 import os
 import time
-import logging
 from typing import List, Dict, Any, Annotated, Optional
 from typing_extensions import TypedDict
 from langchain_core.messages import AnyMessage
 from langchain_groq import ChatGroq
 from langgraph.graph.message import add_messages
+from .logger import get_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +132,21 @@ class EnhancedLLM:
         openai_key    = os.getenv("OPENAI_API_KEY",    "").strip()
         groq_key      = os.getenv("GROQ_API_KEY",      "").strip()
 
+        # LLM_PROVIDER overrides key-based auto-detection so users can pin a
+        # provider even when multiple API keys are present. Useful in testing
+        # ("always use groq") or when a key is set but the provider is down.
+        forced_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+        if forced_provider in ("anthropic", "openai", "groq"):
+            logger.info("LLM_PROVIDER=%s overrides auto-detection", forced_provider)
+            # Mask the other keys so the auto-detect branches below pick only
+            # the forced provider's chain without changing env vars globally.
+            if forced_provider != "anthropic":
+                anthropic_key = ""
+            if forced_provider != "openai":
+                openai_key = ""
+            if forced_provider != "groq":
+                groq_key = ""
+
         if anthropic_key:
             # Anthropic Claude — opus 4.8 is the most capable model for research
             self.primary_config   = ModelConfig("claude-opus-4-8",         provider="anthropic", temperature=0.1, max_tokens=4096)
@@ -193,9 +207,10 @@ class EnhancedLLM:
 
             if config.provider == "anthropic":
                 from langchain_anthropic import ChatAnthropic
+                # Claude 4 models dropped the temperature parameter — omit it entirely
+                # so the API uses the model's built-in default (equivalent to 1.0).
                 llm = ChatAnthropic(
                     model=config.name,
-                    temperature=temp,
                     max_tokens=config.max_tokens,
                 )
             elif config.provider == "openai":
