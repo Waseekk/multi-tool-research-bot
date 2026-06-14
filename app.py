@@ -22,8 +22,9 @@ import streamlit as st
 import os
 import base64
 import uuid
-import json
-import tempfile
+import hashlib
+import secrets as _secrets
+from urllib.parse import urlencode
 from typing import List, Dict, Any
 from datetime import datetime
 
@@ -56,6 +57,9 @@ from src.auth import (
     login_or_create_google_user,
 )
 from src.tools import _active_user_id, _active_pdf_names
+from src.logger import get_logger
+
+logger = get_logger(__name__)
 
 init_db()
 
@@ -293,7 +297,7 @@ class StreamlitChatbot:
             # 12 allows up to 5 tool calls (1 conv_manager + 2×5 tool cycles + 1 final answer)
             # before the recursion limit triggers. Claude Opus is more thorough than Groq
             # and may call 2-3 tools per query, so 5 was too tight.
-            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
+            config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 25}
             result = self.graph.invoke(self._initial_state(message), config)
             ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
             return ai_msgs[-1].content if ai_msgs else "I couldn't generate a response. Please try again."
@@ -314,7 +318,7 @@ class StreamlitChatbot:
                            [{'type': 'text', 'text': 'Hello', 'index': 0}]
                            We extract only the 'text' blocks and join them.
         """
-        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 12}
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 25}
         st.session_state._last_tools_used = []
         _announced_agent = set()   # track which agents we've already announced
         try:
@@ -369,51 +373,71 @@ class StreamlitChatbot:
 # Auth page
 # ---------------------------------------------------------------------------
 
-@st.cache_resource
-def _get_google_credentials_file() -> str:
+def _google_auth_url() -> str:
     """
-    Build a temporary Google OAuth credentials JSON from env vars and return
-    its file path. Cached per server process so the temp file is only written once.
-    Returns empty string if GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are not set.
+    Build Google OAuth URL with PKCE (S256).
+    The code_verifier is embedded in the `state` parameter so it survives the
+    browser redirect — Streamlit loses session state when the page navigates
+    away to Google and back, but Google returns `state` unchanged.
     """
-    client_id     = os.getenv("GOOGLE_CLIENT_ID",     "").strip()
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
-    if not client_id or not client_secret:
-        return ""
-    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501/")
-    creds = {
-        "web": {
-            "client_id":     client_id,
-            "client_secret": client_secret,
-            "redirect_uris": [redirect_uri],
-            "auth_uri":  "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        }
-    }
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(creds, tmp)
-    tmp.close()
-    return tmp.name
+    verifier  = _secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    # Encode verifier into state; Google echoes it back on redirect
+    state = base64.urlsafe_b64encode(verifier.encode()).decode().rstrip("=")
+    params = urlencode({
+        "client_id":             os.getenv("GOOGLE_CLIENT_ID", ""),
+        "redirect_uri":          os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501/"),
+        "response_type":         "code",
+        "scope":                 "openid email profile",
+        "code_challenge":        challenge,
+        "code_challenge_method": "S256",
+        "state":                 state,
+        "access_type":           "online",
+    })
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
 
 
-def _make_google_authenticator():
+def _google_exchange_code(code: str, state: str) -> dict:
     """
-    Return a streamlit_google_auth.Authenticate instance using env-var credentials,
-    or None if credentials are not configured or the package is not installed.
+    Exchange auth code for a Google user profile.
+    Recovers the PKCE code_verifier from the `state` parameter returned by Google.
+    Returns dict with 'email' and 'name', or empty dict on failure.
     """
-    creds_file = _get_google_credentials_file()
-    if not creds_file:
-        return None
+    import requests as _req
     try:
-        from streamlit_google_auth import Authenticate
-        return Authenticate(
-            secret_credentials_path=creds_file,
-            cookie_name="research_bot_auth",
-            cookie_key=os.getenv("COOKIE_SECRET", "research-bot-secret-key-2024"),
-            redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501/"),
-        )
-    except ImportError:
-        return None
+        # Google strips trailing `=` padding from base64 in URLs — re-add it before decoding.
+        # The verifier was base64-encoded (without padding) when building the auth URL;
+        # this restores the original code_verifier string for the token exchange.
+        padded   = state + "=" * (-len(state) % 4)
+        verifier = base64.urlsafe_b64decode(padded.encode()).decode()
+    except Exception as e:
+        logger.warning("GoogleAuth: could not decode verifier from state: %s", e)
+        verifier = ""
+
+    token_resp = _req.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id":     os.getenv("GOOGLE_CLIENT_ID", ""),
+            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+            "code":          code,
+            "code_verifier": verifier,
+            "grant_type":    "authorization_code",
+            "redirect_uri":  os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501/"),
+        },
+        timeout=10,
+    )
+    token = token_resp.json()
+    if "access_token" not in token:
+        logger.error("GoogleAuth: token exchange failed: %s", token)
+        return {}
+    info_resp = _req.get(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {token['access_token']}"},
+        timeout=10,
+    )
+    return info_resp.json()
 
 
 def _show_auth_page() -> None:
@@ -447,26 +471,43 @@ def _show_auth_page() -> None:
     col = st.columns([1, 2, 1])[1]
     with col:
         # ── Google Sign-In (shown only when credentials are configured) ────
-        authenticator = _make_google_authenticator()
-        if authenticator:
-            authenticator.check_authentification()
-
-            if st.session_state.get("connected"):
-                # Google OAuth completed — upsert user in DB and enter app
-                user_info = st.session_state.get("user_info", {})
-                email = user_info.get("email", "")
-                name  = user_info.get("name", "")
-                if email:
-                    db_user = login_or_create_google_user(email, name)
+        if os.getenv("GOOGLE_CLIENT_ID") and os.getenv("GOOGLE_CLIENT_SECRET"):
+            # Google redirects back here with ?code=...&state=... after user approves
+            code  = st.query_params.get("code")
+            state = st.query_params.get("state", "")
+            if code:
+                with st.spinner("Signing in with Google..."):
+                    user_info = _google_exchange_code(code, state)
+                st.query_params.clear()
+                if user_info.get("email"):
+                    db_user = login_or_create_google_user(
+                        user_info["email"], user_info.get("name", "")
+                    )
                     st.session_state.logged_in_user = db_user
                     st.session_state.google_login   = True
                     st.rerun()
-
-            authenticator.login()
-            st.markdown(
-                "<p style='text-align:center;color:#94a3b8;font-size:12px;margin:4px 0 12px'>or sign in with email below</p>",
-                unsafe_allow_html=True,
-            )
+                else:
+                    st.error("Google sign-in failed. Please try again.")
+            else:
+                auth_url = _google_auth_url()
+                st.markdown(
+                    f'<div style="text-align:center;margin-bottom:12px">'
+                    f'<a href="{auth_url}" target="_self" style="text-decoration:none">'
+                    f'<div style="display:inline-flex;align-items:center;gap:10px;'
+                    f'background:white;color:#374151;border:1px solid #d1d5db;'
+                    f'border-radius:8px;padding:10px 28px;font-size:15px;font-weight:500;cursor:pointer">'
+                    f'<svg width="18" height="18" viewBox="0 0 48 48">'
+                    f'<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>'
+                    f'<path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>'
+                    f'<path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>'
+                    f'<path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>'
+                    f'</svg>Sign in with Google</div></a></div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    "<p style='text-align:center;color:#94a3b8;font-size:12px;margin:0 0 16px'>or sign in with email below</p>",
+                    unsafe_allow_html=True,
+                )
 
         # ── Email / password tabs (always shown as fallback) ─────────────
         tab_login, tab_register = st.tabs(["🔐 Login", "📝 Register"])
@@ -574,15 +615,7 @@ def main():
             )
 
         if st.button("🚪 Logout", use_container_width=True):
-            # Clear Google OAuth cookie if this was a Google login
-            if st.session_state.get("google_login"):
-                try:
-                    auth = _make_google_authenticator()
-                    if auth:
-                        auth.logout()
-                except Exception:
-                    pass
-            for k in ("logged_in_user", "google_login", "connected", "user_info",
+            for k in ("logged_in_user", "google_login",
                       "chatbot_initialized", "chatbot", "messages", "thread_id",
                       "user_anthropic_key", "user_openai_key", "user_groq_key"):
                 st.session_state.pop(k, None)

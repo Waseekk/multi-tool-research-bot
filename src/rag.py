@@ -228,6 +228,9 @@ class ResearchVectorStore:
             results = self._collection.query(
                 query_texts=[query],
                 n_results=n_results,
+                # The `where` filter is the ONLY thing that isolates users from each other.
+                # All users share the same "research_papers" ChromaDB collection.
+                # Removing or relaxing this filter would expose one user's PDF chunks to others.
                 where={"user_id": user_id},
                 include=["documents", "metadatas", "distances"],
             )
