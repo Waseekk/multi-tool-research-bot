@@ -36,6 +36,32 @@ logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Cross-provider message sanitizer
+# ---------------------------------------------------------------------------
+
+def _flatten_messages_for_groq(messages: List) -> List:
+    """
+    Groq rejects AIMessages whose content is a list of Anthropic-format blocks
+    (e.g. [{"type": "tool_use", ...}]). This converts any such messages to plain
+    text so the fallback Groq call doesn't 400.
+    ToolMessages are kept as-is — Groq handles those fine.
+    """
+    result = []
+    for msg in messages:
+        if isinstance(msg, AIMessage) and isinstance(msg.content, list):
+            # Extract only the text blocks; drop tool_use / tool_result blocks
+            text = " ".join(
+                block.get("text", "")
+                for block in msg.content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            result.append(AIMessage(content=text or "Let me help you with that."))
+        else:
+            result.append(msg)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Supervisor — keyword routing, no LLM call
 # ---------------------------------------------------------------------------
 
@@ -269,12 +295,13 @@ def _make_llm_node(
                     fallback_llm = llm_manager._create_llm_instance(config)
                     if not fallback_llm:
                         continue
-                    # llama-3.1-8b-instant has a hard 6000 TPM cap on the free Groq
-                    # tier. Long conversations easily exceed this and get a 413.
-                    # Trim to system + last 3 messages to stay safely under the limit.
                     msgs_to_send = messages
-                    if config.provider == "groq" and config.max_tokens <= 2048:
-                        msgs_to_send = messages[:1] + messages[-3:]
+                    if config.provider == "groq":
+                        # Groq can't parse Anthropic-format content blocks
+                        # (list of {type,text} dicts). Flatten them to plain strings.
+                        msgs_to_send = _flatten_messages_for_groq(messages)
+                        if config.max_tokens <= 2048:
+                            msgs_to_send = msgs_to_send[:1] + msgs_to_send[-3:]
                     response = fallback_llm.bind_tools(tools).invoke(msgs_to_send)
                     llm_manager.current_config = config
                     logger.info("%s_agent: switched to fallback %s", agent_label, config.name)
