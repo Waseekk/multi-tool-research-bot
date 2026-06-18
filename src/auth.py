@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DAILY_LIMIT = 20
+DAILY_LIMIT = 15
 ADMIN_EMAIL = "waseekirtefa@gmail.com"
 DB_PATH = Path("data/auth.db")
 
